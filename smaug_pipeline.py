@@ -35,6 +35,7 @@ MFE_HORIZON = 10                # minutes for max-favorable-excursion target
 RTH_ONLY = True                 # keep regular trading hours only (9:30-16:00 ET)
 TEST_FRACTION = 0.25            # most recent 25% of data held out for testing
 MIN_ROWS = 500                  # refuse to run analysis on less than this
+RETENTION_DAYS = 30             # prune bars older than this so the DB stays bounded
 
 
 # ----------------------------------------------------------------------
@@ -98,6 +99,13 @@ def upsert_bars(conn, df):
     )
     conn.commit()
     return len(rows)
+
+
+def prune_old_bars(conn, days=RETENTION_DAYS):
+    """Drop bars older than `days` so the DB (and its git history) stay bounded."""
+    cutoff = (pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=days))
+    conn.execute("DELETE FROM bars WHERE ts < ?", (cutoff.isoformat(),))
+    conn.commit()
 
 
 def load_all_bars(conn):
@@ -379,6 +387,8 @@ def main():
         except Exception as e:
             print(f"WARNING: fetch failed ({e}); analyzing stored data only",
                   file=sys.stderr)
+
+    prune_old_bars(conn)
 
     bars = load_all_bars(conn)
     if len(bars) < MIN_ROWS:
