@@ -364,19 +364,27 @@ def write_report(results):
 
 
 def write_bars_json(bars):
-    """Raw 1-min OHLCV for the retained window, for the webapp's candlestick
-    chart. Compact [ts, o, h, l, c, v] rows to keep the file small."""
+    """Raw 1-min OHLCV + computed indicator features for the retained
+    window, for the webapp's candlestick chart and raw-data table.
+    Features are computed on the full series first (EMA/RSI need
+    warmup) then filtered to RTH, same order as run_analysis()."""
+    feats = compute_features(bars)
+    feature_cols = list(feats.columns)
+    combined = bars.join(feats)
     if RTH_ONLY:
-        mod = bars.index.hour * 60 + bars.index.minute
+        mod = combined.index.hour * 60 + combined.index.minute
         mask = (mod >= 9 * 60 + 30) & (mod < 16 * 60)
-        bars = bars[mask]
-    rows = [
-        [ts.isoformat(), round(float(r.open), 4), round(float(r.high), 4),
-         round(float(r.low), 4), round(float(r.close), 4), int(r.volume)]
-        for ts, r in bars.iterrows()
-    ]
+        combined = combined[mask]
+    rows = []
+    for ts, r in combined.iterrows():
+        row = [ts.isoformat(), round(float(r.open), 4), round(float(r.high), 4),
+               round(float(r.low), 4), round(float(r.close), 4), int(r.volume)]
+        for f in feature_cols:
+            v = r[f]
+            row.append(None if pd.isna(v) else round(float(v), 4))
+        rows.append(row)
     with open(BARS_JSON, "w") as f:
-        json.dump({"ticker": TICKER, "bars": rows}, f)
+        json.dump({"ticker": TICKER, "feature_cols": feature_cols, "bars": rows}, f)
 
 
 # ----------------------------------------------------------------------

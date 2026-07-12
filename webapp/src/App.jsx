@@ -2621,14 +2621,18 @@ function RawDataTab() {
         const resp = await fetch(import.meta.env.BASE_URL + "smaug_bars.json");
         if (resp.ok) {
           const parsed = await resp.json();
+          const featureCols = parsed.feature_cols || [];
           const byDay = new Map();
-          for (const [ts, o, h, l, c, v] of parsed.bars) {
+          for (const row of parsed.bars) {
+            const [ts, o, h, l, c, v, ...featureVals] = row;
             const day = ts.slice(0, 10);
             if (!byDay.has(day)) byDay.set(day, []);
-            byDay.get(day).push({ ts, o, h, l, c, v });
+            const features = {};
+            featureCols.forEach((name, i) => (features[name] = featureVals[i]));
+            byDay.get(day).push({ ts, o, h, l, c, v, features });
           }
           const days = [...byDay.keys()].sort();
-          setDayBars({ days, byDay });
+          setDayBars({ days, byDay, featureCols });
           setDayIndex(days.length - 1);
         }
       } catch {
@@ -2737,7 +2741,7 @@ function RawDataTab() {
           border: `1px solid ${T.panelEdge}`,
           borderRadius: 10,
           maxHeight: 560,
-          overflowY: "auto",
+          overflow: "auto",
         }}
       >
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -2749,6 +2753,11 @@ function RawDataTab() {
               <th style={th}>Low</th>
               <th style={th}>Close</th>
               <th style={th}>Volume</th>
+              {dayBars.featureCols.map((f) => (
+                <th key={f} style={{ ...th, whiteSpace: "nowrap" }}>
+                  {fLabel(f)}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -2760,6 +2769,14 @@ function RawDataTab() {
                 <td style={td}>{b.l.toFixed(2)}</td>
                 <td style={{ ...td, color: b.c >= b.o ? T.green : T.red }}>{b.c.toFixed(2)}</td>
                 <td style={td}>{b.v.toLocaleString()}</td>
+                {dayBars.featureCols.map((f) => {
+                  const v = b.features[f];
+                  return (
+                    <td key={f} style={{ ...td, color: T.dim }}>
+                      {v === null || v === undefined ? "—" : v.toFixed(2)}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
