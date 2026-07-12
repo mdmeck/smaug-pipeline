@@ -1,0 +1,40 @@
+name: Smaug daily pipeline
+
+on:
+  schedule:
+    # 21:30 UTC = 5:30 PM EDT (summer) / 4:30 PM EST (winter).
+    # Cron runs in UTC and can't track US daylight saving, so this time
+    # is chosen to land after the 4:00 PM ET close year-round.
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch: {}   # allows manual "Run workflow" button for testing
+
+permissions:
+  contents: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install yfinance pandas numpy
+
+      - name: Run pipeline
+        run: python smaug_pipeline.py
+
+      - name: Commit updated data and results
+        run: |
+          git config user.name "smaug-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add spy_1m.db smaug_results.json smaug_report.txt
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Daily run: $(date -u +%Y-%m-%d)"
+          git push
