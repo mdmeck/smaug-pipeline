@@ -2609,8 +2609,168 @@ function ApiKeySettings() {
   );
 }
 
+// ---------- Raw Data tab ----------
+function RawDataTab() {
+  const [dayBars, setDayBars] = useState(null);
+  const [dayIndex, setDayIndex] = useState(0);
+  const [loadState, setLoadState] = useState("loading");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const resp = await fetch(import.meta.env.BASE_URL + "smaug_bars.json");
+        if (resp.ok) {
+          const parsed = await resp.json();
+          const byDay = new Map();
+          for (const [ts, o, h, l, c, v] of parsed.bars) {
+            const day = ts.slice(0, 10);
+            if (!byDay.has(day)) byDay.set(day, []);
+            byDay.get(day).push({ ts, o, h, l, c, v });
+          }
+          const days = [...byDay.keys()].sort();
+          setDayBars({ days, byDay });
+          setDayIndex(days.length - 1);
+        }
+      } catch {
+        // no bar data available
+      }
+      setLoadState("ready");
+    })();
+  }, []);
+
+  if (loadState === "loading") {
+    return (
+      <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>
+        Loading…
+      </div>
+    );
+  }
+
+  if (!dayBars || dayBars.days.length === 0) {
+    return (
+      <div style={{ color: T.dim, fontSize: 13 }}>
+        No bar data found. Run the pipeline to generate smaug_bars.json.
+      </div>
+    );
+  }
+
+  const day = dayBars.days[dayIndex];
+  const bars = dayBars.byDay.get(day) || [];
+  const navBtn = (disabled) => ({
+    ...retryBtn,
+    padding: "4px 10px",
+    opacity: disabled ? 0.35 : 1,
+    cursor: disabled ? "default" : "pointer",
+  });
+  const fmtTime = (ts) =>
+    new Date(ts).toLocaleTimeString("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  const th = {
+    position: "sticky",
+    top: 0,
+    background: T.panel,
+    color: T.dim,
+    fontFamily: T.mono,
+    fontSize: 11,
+    fontWeight: 400,
+    textAlign: "right",
+    padding: "6px 12px",
+    borderBottom: `1px solid ${T.panelEdge}`,
+  };
+  const td = {
+    fontFamily: T.mono,
+    fontSize: 12,
+    color: T.ink,
+    textAlign: "right",
+    padding: "4px 12px",
+    borderBottom: `1px solid ${T.panelEdge}`,
+  };
+
+  return (
+    <div>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: 10,
+          marginBottom: 14,
+        }}
+      >
+        <button
+          onClick={() => setDayIndex((i) => Math.max(0, i - 1))}
+          disabled={dayIndex === 0}
+          style={navBtn(dayIndex === 0)}
+        >
+          ← Prev
+        </button>
+        <span
+          style={{
+            fontFamily: T.mono,
+            fontSize: 12,
+            color: T.ink,
+            minWidth: 90,
+            textAlign: "center",
+          }}
+        >
+          {day}
+        </span>
+        <button
+          onClick={() => setDayIndex((i) => Math.min(dayBars.days.length - 1, i + 1))}
+          disabled={dayIndex === dayBars.days.length - 1}
+          style={navBtn(dayIndex === dayBars.days.length - 1)}
+        >
+          Next →
+        </button>
+        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginLeft: "auto" }}>
+          {bars.length} bars
+        </span>
+      </div>
+
+      <div
+        style={{
+          background: T.panel,
+          border: `1px solid ${T.panelEdge}`,
+          borderRadius: 10,
+          maxHeight: 560,
+          overflowY: "auto",
+        }}
+      >
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={{ ...th, textAlign: "left" }}>Time (ET)</th>
+              <th style={th}>Open</th>
+              <th style={th}>High</th>
+              <th style={th}>Low</th>
+              <th style={th}>Close</th>
+              <th style={th}>Volume</th>
+            </tr>
+          </thead>
+          <tbody>
+            {bars.map((b) => (
+              <tr key={b.ts}>
+                <td style={{ ...td, textAlign: "left", color: T.dim }}>{fmtTime(b.ts)}</td>
+                <td style={td}>{b.o.toFixed(2)}</td>
+                <td style={td}>{b.h.toFixed(2)}</td>
+                <td style={td}>{b.l.toFixed(2)}</td>
+                <td style={{ ...td, color: b.c >= b.o ? T.green : T.red }}>{b.c.toFixed(2)}</td>
+                <td style={td}>{b.v.toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ---------- main ----------
-const TABS = ["Morning Brief", "Journal", "Modeling", "Resources"];
+const TABS = ["Morning Brief", "Journal", "Modeling", "Raw Data", "Resources"];
 
 export default function Smaug() {
   const now = useEtClock();
@@ -2802,6 +2962,7 @@ export default function Smaug() {
         )}
         {tab === "Journal" && <JournalTab />}
         {tab === "Modeling" && <TechnicalsTab />}
+        {tab === "Raw Data" && <RawDataTab />}
         {tab === "Resources" && <ResourcesTab />}
       </div>
     </div>
