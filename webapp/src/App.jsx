@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { createChart, CandlestickSeries } from "lightweight-charts";
+import { supabase } from "./supabaseClient.js";
 
 // ---------- theme (Apex Forge) ----------
 const T = {
@@ -877,8 +878,119 @@ function MorningBriefTab({ panels, runPanel, runAll, anyLoading, lastRun }) {
   );
 }
 
+// ---------- auth gate (Supabase) ----------
+function useSession() {
+  const [session, setSession] = useState(undefined); // undefined = still loading
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  return session;
+}
+
+function AuthGate({ children }) {
+  const session = useSession();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  async function signIn() {
+    setError(null);
+    setBusy(true);
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+    if (err) setError(err.message);
+    setBusy(false);
+  }
+
+  if (session === undefined) {
+    return (
+      <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>
+        Loading…
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div
+        style={{
+          background: T.panel,
+          border: `1px solid ${T.panelEdge}`,
+          borderRadius: 10,
+          padding: 24,
+          maxWidth: 340,
+        }}
+      >
+        <div style={{ fontSize: 14, color: T.ink, marginBottom: 14, fontWeight: 700 }}>
+          Sign in
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="email"
+            style={inputStyle}
+          />
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="password"
+            onKeyDown={(e) => e.key === "Enter" && signIn()}
+            style={inputStyle}
+          />
+          {error && <div style={{ color: T.red, fontSize: 12 }}>{error}</div>}
+          <button
+            onClick={signIn}
+            disabled={busy}
+            style={{
+              background: T.amber,
+              color: "#141414",
+              border: "none",
+              borderRadius: 8,
+              padding: "9px 18px",
+              fontSize: 13,
+              fontWeight: 700,
+              cursor: busy ? "default" : "pointer",
+              fontFamily: T.sans,
+            }}
+          >
+            {busy ? "Signing in…" : "Sign in"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          marginBottom: 10,
+        }}
+      >
+        <button
+          onClick={() => supabase.auth.signOut()}
+          style={{ ...retryBtn, padding: "3px 10px", fontSize: 11 }}
+        >
+          Sign out ({session.user.email})
+        </button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
 // ---------- Journal tab ----------
-const JOURNAL_KEY = "smaug-journal-entries";
 const storage = {
   async get(key) {
     const v = localStorage.getItem(key);
@@ -934,42 +1046,45 @@ function JournalTab() {
 
   useEffect(() => {
     (async () => {
-      if (!storageAvailable) {
-        setLoadState("memory");
-        return;
+      const { data, error } = await supabase
+        .from("journal_entries")
+        .select("*")
+        .order("date", { ascending: false })
+        .order("created_at", { ascending: false });
+      if (error) {
+        setSaveError(error.message);
+      } else {
+        setEntries(data);
       }
-      try {
-        const result = await storage.get(JOURNAL_KEY);
-        setEntries(result ? JSON.parse(result.value) : []);
-        setLoadState("ready");
-      } catch (err) {
-        // Key doesn't exist yet — that's fine, start empty.
-        setEntries([]);
-        setLoadState("ready");
-      }
+      setLoadState("ready");
     })();
   }, []);
 
-  async function persist(next) {
-    setEntries(next);
-    if (!storageAvailable) return;
-    try {
-      setSaveError(null);
-      await storage.set(JOURNAL_KEY, JSON.stringify(next));
-    } catch (err) {
-      setSaveError("Save failed — entry is shown but may not persist.");
-    }
-  }
-
-  function addEntry() {
+  async function addEntry() {
     if (!form.setup.trim() && !form.notes.trim()) return;
-    const entry = { ...form, id: Date.now() };
-    persist([entry, ...entries]);
+    setSaveError(null);
+    const { data, error } = await supabase
+      .from("journal_entries")
+      .insert(form)
+      .select()
+      .single();
+    if (error) {
+      setSaveError(error.message);
+      return;
+    }
+    setEntries([data, ...entries]);
     setForm(emptyEntry());
   }
 
-  function deleteEntry(id) {
-    persist(entries.filter((e) => e.id !== id));
+  async function deleteEntry(id) {
+    setSaveError(null);
+    const prev = entries;
+    setEntries(entries.filter((e) => e.id !== id));
+    const { error } = await supabase.from("journal_entries").delete().eq("id", id);
+    if (error) {
+      setSaveError(error.message);
+      setEntries(prev);
+    }
   }
 
   const field = (label, node) => (
@@ -997,12 +1112,6 @@ function JournalTab() {
 
   return (
     <div>
-      {loadState === "memory" && (
-        <div style={{ fontSize: 12, color: T.amber, marginBottom: 12 }}>
-          Persistent storage isn't available in this environment — entries will
-          only last for this session.
-        </div>
-      )}
       {saveError && (
         <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>
           {saveError}
@@ -1394,6 +1503,265 @@ function JournalTab() {
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Training Data tab ----------
+const emptyExample = () => ({
+  date: todayISO(),
+  time: "09:30",
+  type: "Entry",
+  direction: "Long",
+  quality: "Good",
+  notes: "",
+});
+
+function TrainingDataTab() {
+  const [examples, setExamples] = useState([]);
+  const [form, setForm] = useState(emptyExample());
+  const [loadState, setLoadState] = useState("loading");
+  const [saveError, setSaveError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from("training_examples")
+        .select("*")
+        .order("occurred_at", { ascending: false });
+      if (error) {
+        setSaveError(error.message);
+      } else {
+        setExamples(data);
+      }
+      setLoadState("ready");
+    })();
+  }, []);
+
+  async function addExample() {
+    setSaveError(null);
+    const occurred_at = new Date(`${form.date}T${form.time}:00`).toISOString();
+    const { data, error } = await supabase
+      .from("training_examples")
+      .insert({
+        occurred_at,
+        type: form.type,
+        direction: form.direction,
+        quality: form.quality,
+        notes: form.notes,
+      })
+      .select()
+      .single();
+    if (error) {
+      setSaveError(error.message);
+      return;
+    }
+    setExamples([data, ...examples]);
+    setForm(emptyExample());
+  }
+
+  async function deleteExample(id) {
+    setSaveError(null);
+    const prev = examples;
+    setExamples(examples.filter((e) => e.id !== id));
+    const { error } = await supabase.from("training_examples").delete().eq("id", id);
+    if (error) {
+      setSaveError(error.message);
+      setExamples(prev);
+    }
+  }
+
+  const field = (label, node) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span
+        style={{
+          fontFamily: T.mono,
+          fontSize: 10,
+          letterSpacing: "0.12em",
+          color: T.faint,
+        }}
+      >
+        {label}
+      </span>
+      {node}
+    </div>
+  );
+
+  const selectStyle = { ...inputStyle, cursor: "pointer" };
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: T.dim, marginBottom: 14 }}>
+        Labeled entry/exit examples for training and refining the model — not
+        a trade log. Times are your browser's local time.
+      </div>
+      {saveError && (
+        <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>
+          {saveError}
+        </div>
+      )}
+
+      {/* entry form */}
+      <div
+        style={{
+          background: T.panel,
+          border: `1px solid ${T.panelEdge}`,
+          borderRadius: 10,
+          padding: 14,
+          marginBottom: 14,
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: T.ink }}>
+          Log an example
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
+            gap: 10,
+            marginBottom: 10,
+          }}
+        >
+          {field(
+            "DATE",
+            <input
+              type="date"
+              value={form.date}
+              onChange={(e) => setForm({ ...form, date: e.target.value })}
+              style={inputStyle}
+            />
+          )}
+          {field(
+            "TIME (LOCAL)",
+            <input
+              type="time"
+              value={form.time}
+              onChange={(e) => setForm({ ...form, time: e.target.value })}
+              style={inputStyle}
+            />
+          )}
+          {field(
+            "TYPE",
+            <select
+              value={form.type}
+              onChange={(e) => setForm({ ...form, type: e.target.value })}
+              style={selectStyle}
+            >
+              <option>Entry</option>
+              <option>Exit</option>
+            </select>
+          )}
+          {field(
+            "DIRECTION",
+            <select
+              value={form.direction}
+              onChange={(e) => setForm({ ...form, direction: e.target.value })}
+              style={selectStyle}
+            >
+              <option>Long</option>
+              <option>Short</option>
+            </select>
+          )}
+          {field(
+            "QUALITY",
+            <select
+              value={form.quality}
+              onChange={(e) => setForm({ ...form, quality: e.target.value })}
+              style={selectStyle}
+            >
+              <option>Good</option>
+              <option>Bad</option>
+            </select>
+          )}
+        </div>
+        {field(
+          "NOTES",
+          <textarea
+            value={form.notes}
+            onChange={(e) => setForm({ ...form, notes: e.target.value })}
+            rows={2}
+            placeholder="Why is this a good or bad example?"
+            style={{ ...inputStyle, resize: "vertical" }}
+          />
+        )}
+        <button
+          onClick={addExample}
+          style={{
+            background: T.amber,
+            color: "#141414",
+            border: "none",
+            borderRadius: 8,
+            padding: "9px 18px",
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: "pointer",
+            fontFamily: T.sans,
+            marginTop: 10,
+          }}
+        >
+          Add example
+        </button>
+      </div>
+
+      {/* examples list */}
+      {loadState === "loading" ? (
+        <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>
+          Loading…
+        </div>
+      ) : examples.length === 0 ? (
+        <div style={{ color: T.dim, fontSize: 13 }}>No examples logged yet.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {examples.map((ex) => (
+            <div
+              key={ex.id}
+              style={{
+                background: T.panel,
+                border: `1px solid ${T.panelEdge}`,
+                borderRadius: 8,
+                padding: 12,
+                display: "flex",
+                alignItems: "center",
+                gap: 14,
+              }}
+            >
+              <span style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, minWidth: 140 }}>
+                {new Date(ex.occurred_at).toLocaleString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  hour12: false,
+                })}
+              </span>
+              <span
+                style={{
+                  fontFamily: T.mono,
+                  fontSize: 11,
+                  color: ex.quality === "Good" ? T.green : T.red,
+                  fontWeight: 700,
+                  minWidth: 40,
+                }}
+              >
+                {ex.quality}
+              </span>
+              <span style={{ fontFamily: T.mono, fontSize: 11, color: T.ink, minWidth: 50 }}>
+                {ex.type}
+              </span>
+              <span style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, minWidth: 55 }}>
+                {ex.direction}
+              </span>
+              <span style={{ fontSize: 12, color: T.dim, flex: 1 }}>{ex.notes}</span>
+              <button
+                onClick={() => deleteExample(ex.id)}
+                style={{ ...retryBtn, padding: "3px 10px", fontSize: 11, flexShrink: 0 }}
+              >
+                Delete
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -2787,7 +3155,14 @@ function RawDataTab() {
 }
 
 // ---------- main ----------
-const TABS = ["Morning Brief", "Journal", "Modeling", "Raw Data", "Resources"];
+const TABS = [
+  "Morning Brief",
+  "Journal",
+  "Modeling",
+  "Raw Data",
+  "Training Data",
+  "Resources",
+];
 
 export default function Smaug() {
   const now = useEtClock();
@@ -2977,9 +3352,18 @@ export default function Smaug() {
             lastRun={lastRun}
           />
         )}
-        {tab === "Journal" && <JournalTab />}
+        {tab === "Journal" && (
+          <AuthGate>
+            <JournalTab />
+          </AuthGate>
+        )}
         {tab === "Modeling" && <TechnicalsTab />}
         {tab === "Raw Data" && <RawDataTab />}
+        {tab === "Training Data" && (
+          <AuthGate>
+            <TrainingDataTab />
+          </AuthGate>
+        )}
         {tab === "Resources" && <ResourcesTab />}
       </div>
     </div>
