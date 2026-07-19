@@ -1,0 +1,164 @@
+{
+  "generated_at": "2026-07-19T20:12:23Z",
+  "econ": {
+    "events": [
+      {
+        "day": "Mon",
+        "time_et": "All Week",
+        "event": "Fed pre-FOMC blackout in effect (no Fed speakers) ahead of Jul 28-29 FOMC",
+        "impact": "medium",
+        "forecast": "",
+        "previous": ""
+      },
+      {
+        "day": "Wed",
+        "time_et": "1:00 PM",
+        "event": "20-Year Bond Auction",
+        "impact": "medium",
+        "forecast": "",
+        "previous": ""
+      },
+      {
+        "day": "Thu",
+        "time_et": "8:30 AM",
+        "event": "Initial Jobless Claims",
+        "impact": "medium",
+        "forecast": "",
+        "previous": ""
+      },
+      {
+        "day": "Fri",
+        "time_et": "9:45 AM",
+        "event": "S&P Global Flash Manufacturing PMI",
+        "impact": "medium",
+        "forecast": "",
+        "previous": ""
+      },
+      {
+        "day": "Fri",
+        "time_et": "9:45 AM",
+        "event": "S&P Global Flash Services PMI",
+        "impact": "medium",
+        "forecast": "",
+        "previous": ""
+      },
+      {
+        "day": "Fri",
+        "time_et": "10:00 AM",
+        "event": "New Home Sales",
+        "impact": "medium",
+        "forecast": "",
+        "previous": ""
+      }
+    ]
+  },
+  "earnings": {
+    "earnings": [
+      {
+        "day": "Tue",
+        "ticker": "GM",
+        "company": "General Motors",
+        "time": "BMO",
+        "note": "Auto demand and tariff cost read"
+      },
+      {
+        "day": "Tue",
+        "ticker": "COF",
+        "company": "Capital One",
+        "time": "AMC",
+        "note": "Consumer credit health signal"
+      },
+      {
+        "day": "Wed",
+        "ticker": "TSLA",
+        "company": "Tesla",
+        "time": "AMC",
+        "note": "AI/robotaxi capex, biggest vol event"
+      },
+      {
+        "day": "Wed",
+        "ticker": "GOOGL",
+        "company": "Alphabet",
+        "time": "AMC",
+        "note": "Cloud/AI capex sets mega-cap tone"
+      },
+      {
+        "day": "Wed",
+        "ticker": "TXN",
+        "company": "Texas Instruments",
+        "time": "AMC",
+        "note": "Semiconductor demand bellwether"
+      },
+      {
+        "day": "Wed",
+        "ticker": "IBM",
+        "company": "IBM",
+        "time": "AMC",
+        "note": "Enterprise AI adoption gauge"
+      },
+      {
+        "day": "Wed",
+        "ticker": "NOW",
+        "company": "ServiceNow",
+        "time": "AMC",
+        "note": "Enterprise software/AI spend read"
+      },
+      {
+        "day": "Wed",
+        "ticker": "T",
+        "company": "AT&T",
+        "time": "BMO",
+        "note": "Telecom mega-cap, subscriber trends"
+      },
+      {
+        "day": "Thu",
+        "ticker": "INTC",
+        "company": "Intel",
+        "time": "AMC",
+        "note": "Critical after this week's chip rout"
+      },
+      {
+        "day": "Thu",
+        "ticker": "LMT",
+        "company": "Lockheed Martin",
+        "time": "BMO",
+        "note": "Defense mega-cap earnings"
+      },
+      {
+        "day": "Fri",
+        "ticker": "AXP",
+        "company": "American Express",
+        "time": "BMO",
+        "note": "Card spending, consumer strength read"
+      },
+      {
+        "day": "Fri",
+        "ticker": "VZ",
+        "company": "Verizon",
+        "time": "BMO",
+        "note": "Telecom mega-cap earnings"
+      }
+    ]
+  },
+  "sentiment": {
+    "futures": "ES roughly flat, cautious tone",
+    "vix": "~17.5, elevated after Friday's chip-led selloff",
+    "fear_greed": "37 - Fear",
+    "overnight": "Quiet weekend session; no major fresh headlines, market still digesting Friday's semiconductor rout triggered by China's Moonshot AI unveiling its 2.8T-parameter Kimi K3 open-source model.",
+    "summary": "Tape enters the week on the defensive after chip stocks led a broad selloff, with the SOX roughly 20% off its highs and the S&P 500 posting a 1.6% weekly loss. Traders are bracing for a heavy mega-cap earnings slate (GOOGL, TSLA Wed; INTC Thu) during the Fed's pre-FOMC blackout.",
+    "tone": "bearish"
+  },
+  "cases": {
+    "bull": [
+      "GOOGL cloud/AI capex beat could reignite AI trade enthusiasm Wednesday",
+      "S&P 500 tracking ~22% Q2 EPS growth, strongest pace in years",
+      "Fed blackout removes hawkish-speaker risk; oversold chips ripe for a bounce"
+    ],
+    "bear": [
+      "SOX down ~20% from highs; Kimi K3 threatens US AI-capex thesis",
+      "BofA warns speculation is at extreme levels, risking a valuation snapback",
+      "Heavy mega-cap earnings (TSLA, GOOGL, INTC) raise binary event risk this week"
+    ],
+    "watch": "Alphabet and Tesla earnings Wednesday after the close set the tone for the AI trade into month-end FOMC."
+  }
+}
