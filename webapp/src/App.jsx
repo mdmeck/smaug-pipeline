@@ -68,6 +68,17 @@ function todayISO() {
   return `${d.getFullYear()}-${m}-${day}`;
 }
 
+// Splits a stored UTC ISO timestamp into local <input type="date">/<input
+// type="time"> values (the inverse of `new Date(`${date}T${time}:00`)`).
+function isoToLocalParts(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return {
+    date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    time: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+  };
+}
+
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
 
 function tradingWeek() {
@@ -300,7 +311,7 @@ function WeekCalendar({ econ, earnings, lastRun }) {
                     background: today ? "rgba(224,123,42,0.06)" : "transparent",
                     display: "flex",
                     flexDirection: "column",
-                    minHeight: 200,
+                    height: 230,
                   }}
                 >
                   <div
@@ -345,7 +356,7 @@ function WeekCalendar({ econ, earnings, lastRun }) {
                     )}
                   </div>
 
-                  <div style={{ padding: "10px 12px", flex: 1 }}>
+                  <div style={{ padding: "10px 12px", flex: 1, overflowY: "auto" }}>
                     {econ && dayEcon.length === 0 && (
                       <div
                         style={{
@@ -431,49 +442,50 @@ function WeekCalendar({ econ, earnings, lastRun }) {
                             <div
                               key={j}
                               title={e.note || e.company}
-                              style={{
-                                display: "grid",
-                                gridTemplateColumns: "18px 46px 36px 1fr",
-                                alignItems: "baseline",
-                                gap: 6,
-                              }}
+                              style={{ display: "flex", gap: 6, alignItems: "flex-start" }}
                             >
-                              <span
-                                style={{
-                                  fontSize: 13,
-                                  lineHeight: 1,
-                                }}
-                              >
+                              <span style={{ fontSize: 13, lineHeight: 1.4, flexShrink: 0 }}>
                                 💸
                               </span>
-                              <span
-                                style={{
-                                  fontSize: 13,
-                                  fontWeight: 700,
-                                  color: T.blue,
-                                }}
-                              >
-                                {e.ticker}
-                              </span>
-                              <span
-                                style={{
-                                  fontSize: 13,
-                                  color: T.faint,
-                                }}
-                              >
-                                {e.time}
-                              </span>
-                              {e.company && (
-                                <span
+                              <div style={{ minWidth: 0 }}>
+                                <div
                                   style={{
-                                    fontSize: 13,
-                                    color: T.dim,
-                                    lineHeight: 1.3,
+                                    display: "flex",
+                                    alignItems: "baseline",
+                                    gap: 6,
+                                    flexWrap: "wrap",
                                   }}
                                 >
-                                  {e.company}
-                                </span>
-                              )}
+                                  <span
+                                    style={{
+                                      fontSize: 13,
+                                      fontWeight: 700,
+                                      color: T.blue,
+                                    }}
+                                  >
+                                    {e.ticker}
+                                  </span>
+                                  <span
+                                    style={{
+                                      fontSize: 12,
+                                      color: T.faint,
+                                    }}
+                                  >
+                                    {e.time}
+                                  </span>
+                                </div>
+                                {e.company && (
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      color: T.dim,
+                                      lineHeight: 1.3,
+                                    }}
+                                  >
+                                    {e.company}
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -526,6 +538,39 @@ function Panel({ title, hasData, children }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------- toggle button group (replaces <select> for small fixed option sets) ----------
+function ToggleGroup({ value, onChange, options, colorFor }) {
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      {options.map((opt) => {
+        const active = value === opt;
+        const c = colorFor ? colorFor(opt) : T.amber;
+        return (
+          <button
+            key={opt}
+            type="button"
+            onClick={() => onChange(opt)}
+            style={{
+              flex: 1,
+              background: active ? c : "transparent",
+              border: `1px solid ${active ? c : T.panelEdge}`,
+              color: active ? "#141414" : T.dim,
+              borderRadius: 6,
+              padding: "8px 10px",
+              fontSize: 12,
+              fontWeight: active ? 700 : 400,
+              cursor: "pointer",
+              fontFamily: T.sans,
+            }}
+          >
+            {opt}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1430,8 +1475,9 @@ function JournalTab() {
 // ---------- Training Data tab ----------
 const emptyExample = () => ({
   date: todayISO(),
-  time: "09:30",
-  type: "Entry",
+  entryTime: "09:30",
+  exitTime: "09:35",
+  ticker: "SPY",
   direction: "Long",
   quality: "Good",
   notes: "",
@@ -1442,13 +1488,15 @@ function TrainingDataTab() {
   const [form, setForm] = useState(emptyExample());
   const [loadState, setLoadState] = useState("loading");
   const [saveError, setSaveError] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(null);
 
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase
         .from("training_examples")
         .select("*")
-        .order("occurred_at", { ascending: false });
+        .order("entry_at", { ascending: false });
       if (error) {
         setSaveError(error.message);
       } else {
@@ -1460,12 +1508,14 @@ function TrainingDataTab() {
 
   async function addExample() {
     setSaveError(null);
-    const occurred_at = new Date(`${form.date}T${form.time}:00`).toISOString();
+    const entry_at = new Date(`${form.date}T${form.entryTime}:00`).toISOString();
+    const exit_at = new Date(`${form.date}T${form.exitTime}:00`).toISOString();
     const { data, error } = await supabase
       .from("training_examples")
       .insert({
-        occurred_at,
-        type: form.type,
+        entry_at,
+        exit_at,
+        ticker: form.ticker,
         direction: form.direction,
         quality: form.quality,
         notes: form.notes,
@@ -1491,6 +1541,57 @@ function TrainingDataTab() {
     }
   }
 
+  function startEdit(ex) {
+    setSaveError(null);
+    const entryParts = isoToLocalParts(ex.entry_at);
+    const exitParts = isoToLocalParts(ex.exit_at);
+    setEditingId(ex.id);
+    setEditForm({
+      date: entryParts.date,
+      entryTime: entryParts.time,
+      exitTime: exitParts.time,
+      ticker: ex.ticker,
+      direction: ex.direction,
+      quality: ex.quality,
+      notes: ex.notes,
+    });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditForm(null);
+  }
+
+  async function saveEdit() {
+    setSaveError(null);
+    const entry_at = new Date(`${editForm.date}T${editForm.entryTime}:00`).toISOString();
+    const exit_at = new Date(`${editForm.date}T${editForm.exitTime}:00`).toISOString();
+    const { data, error } = await supabase
+      .from("training_examples")
+      .update({
+        entry_at,
+        exit_at,
+        ticker: editForm.ticker,
+        direction: editForm.direction,
+        quality: editForm.quality,
+        notes: editForm.notes,
+      })
+      .eq("id", editingId)
+      .select()
+      .single();
+    if (error) {
+      setSaveError(error.message);
+      return;
+    }
+    setExamples(
+      examples
+        .map((e) => (e.id === data.id ? data : e))
+        .sort((a, b) => new Date(b.entry_at) - new Date(a.entry_at))
+    );
+    setEditingId(null);
+    setEditForm(null);
+  }
+
   const field = (label, node) => (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span
@@ -1507,13 +1608,91 @@ function TrainingDataTab() {
     </div>
   );
 
-  const selectStyle = { ...inputStyle, cursor: "pointer" };
+  function formFields(f, setF) {
+    return (
+      <>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
+            gap: 10,
+            marginBottom: 10,
+          }}
+        >
+          {field(
+            "DATE",
+            <input
+              type="date"
+              value={f.date}
+              onChange={(e) => setF({ ...f, date: e.target.value })}
+              style={inputStyle}
+            />
+          )}
+          {field(
+            "ENTRY TIME",
+            <input
+              type="time"
+              value={f.entryTime}
+              onChange={(e) => setF({ ...f, entryTime: e.target.value })}
+              style={inputStyle}
+            />
+          )}
+          {field(
+            "EXIT TIME",
+            <input
+              type="time"
+              value={f.exitTime}
+              onChange={(e) => setF({ ...f, exitTime: e.target.value })}
+              style={inputStyle}
+            />
+          )}
+          {field(
+            "TICKER",
+            <input
+              type="text"
+              value={f.ticker}
+              onChange={(e) => setF({ ...f, ticker: e.target.value.toUpperCase() })}
+              style={inputStyle}
+            />
+          )}
+          {field(
+            "DIRECTION",
+            <ToggleGroup
+              value={f.direction}
+              onChange={(v) => setF({ ...f, direction: v })}
+              options={["Long", "Short"]}
+              colorFor={(o) => (o === "Long" ? T.blue : T.amber)}
+            />
+          )}
+          {field(
+            "QUALITY",
+            <ToggleGroup
+              value={f.quality}
+              onChange={(v) => setF({ ...f, quality: v })}
+              options={["Good", "Bad"]}
+              colorFor={(o) => (o === "Good" ? T.green : T.red)}
+            />
+          )}
+        </div>
+        {field(
+          "NOTES",
+          <textarea
+            value={f.notes}
+            onChange={(e) => setF({ ...f, notes: e.target.value })}
+            rows={2}
+            placeholder="Why is this a good or bad example?"
+            style={{ ...inputStyle, resize: "vertical" }}
+          />
+        )}
+      </>
+    );
+  }
 
   return (
     <div>
       <div style={{ fontSize: 12, color: T.dim, marginBottom: 14 }}>
-        Labeled entry/exit examples for training and refining the model — not
-        a trade log. Times are your browser's local time.
+        Labeled trade examples for training and refining the model — not a
+        trade log. Times are your browser's local time.
       </div>
       {saveError && (
         <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>
@@ -1534,76 +1713,7 @@ function TrainingDataTab() {
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, color: T.ink }}>
           Log an example
         </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
-            gap: 10,
-            marginBottom: 10,
-          }}
-        >
-          {field(
-            "DATE",
-            <input
-              type="date"
-              value={form.date}
-              onChange={(e) => setForm({ ...form, date: e.target.value })}
-              style={inputStyle}
-            />
-          )}
-          {field(
-            "TIME (LOCAL)",
-            <input
-              type="time"
-              value={form.time}
-              onChange={(e) => setForm({ ...form, time: e.target.value })}
-              style={inputStyle}
-            />
-          )}
-          {field(
-            "TYPE",
-            <select
-              value={form.type}
-              onChange={(e) => setForm({ ...form, type: e.target.value })}
-              style={selectStyle}
-            >
-              <option>Entry</option>
-              <option>Exit</option>
-            </select>
-          )}
-          {field(
-            "DIRECTION",
-            <select
-              value={form.direction}
-              onChange={(e) => setForm({ ...form, direction: e.target.value })}
-              style={selectStyle}
-            >
-              <option>Long</option>
-              <option>Short</option>
-            </select>
-          )}
-          {field(
-            "QUALITY",
-            <select
-              value={form.quality}
-              onChange={(e) => setForm({ ...form, quality: e.target.value })}
-              style={selectStyle}
-            >
-              <option>Good</option>
-              <option>Bad</option>
-            </select>
-          )}
-        </div>
-        {field(
-          "NOTES",
-          <textarea
-            value={form.notes}
-            onChange={(e) => setForm({ ...form, notes: e.target.value })}
-            rows={2}
-            placeholder="Why is this a good or bad example?"
-            style={{ ...inputStyle, resize: "vertical" }}
-          />
-        )}
+        {formFields(form, setForm)}
         <button
           onClick={addExample}
           style={{
@@ -1632,54 +1742,105 @@ function TrainingDataTab() {
         <div style={{ color: T.dim, fontSize: 13 }}>No examples logged yet.</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {examples.map((ex) => (
-            <div
-              key={ex.id}
-              style={{
-                background: T.panel,
-                border: `1px solid ${T.panelEdge}`,
-                borderRadius: 8,
-                padding: 12,
-                display: "flex",
-                alignItems: "center",
-                gap: 14,
-              }}
-            >
-              <span style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, minWidth: 140 }}>
-                {new Date(ex.occurred_at).toLocaleString("en-US", {
-                  month: "short",
-                  day: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  hour12: false,
-                })}
-              </span>
-              <span
+          {examples.map((ex) =>
+            editingId === ex.id ? (
+              <div
+                key={ex.id}
                 style={{
-                  fontFamily: T.mono,
-                  fontSize: 11,
-                  color: ex.quality === "Good" ? T.green : T.red,
-                  fontWeight: 700,
-                  minWidth: 40,
+                  background: T.panel,
+                  border: `1px solid ${T.amber}`,
+                  borderRadius: 8,
+                  padding: 12,
                 }}
               >
-                {ex.quality}
-              </span>
-              <span style={{ fontFamily: T.mono, fontSize: 11, color: T.ink, minWidth: 50 }}>
-                {ex.type}
-              </span>
-              <span style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, minWidth: 55 }}>
-                {ex.direction}
-              </span>
-              <span style={{ fontSize: 12, color: T.dim, flex: 1 }}>{ex.notes}</span>
-              <button
-                onClick={() => deleteExample(ex.id)}
-                style={{ ...retryBtn, padding: "3px 10px", fontSize: 11, flexShrink: 0 }}
+                {formFields(editForm, setEditForm)}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    onClick={saveEdit}
+                    style={{
+                      background: T.amber,
+                      color: "#141414",
+                      border: "none",
+                      borderRadius: 8,
+                      padding: "7px 16px",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      fontFamily: T.sans,
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={cancelEdit}
+                    style={{ ...retryBtn, padding: "7px 16px", fontSize: 12 }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div
+                key={ex.id}
+                style={{
+                  background: T.panel,
+                  border: `1px solid ${T.panelEdge}`,
+                  borderRadius: 8,
+                  padding: 12,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 14,
+                  flexWrap: "wrap",
+                }}
               >
-                Delete
-              </button>
-            </div>
-          ))}
+                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, minWidth: 175 }}>
+                  {new Date(ex.entry_at).toLocaleString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    hour12: false,
+                  })}
+                  {" → "}
+                  {new Date(ex.exit_at).toLocaleTimeString("en-US", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    hour12: false,
+                  })}
+                </span>
+                <span
+                  style={{
+                    fontFamily: T.mono,
+                    fontSize: 11,
+                    color: ex.quality === "Good" ? T.green : T.red,
+                    fontWeight: 700,
+                    minWidth: 40,
+                  }}
+                >
+                  {ex.quality}
+                </span>
+                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.amber, minWidth: 45 }}>
+                  {ex.ticker}
+                </span>
+                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.blue, minWidth: 55 }}>
+                  {ex.direction}
+                </span>
+                <span style={{ fontSize: 12, color: T.dim, flex: 1 }}>{ex.notes}</span>
+                <button
+                  onClick={() => startEdit(ex)}
+                  style={{ ...retryBtn, padding: "3px 10px", fontSize: 11, flexShrink: 0 }}
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => deleteExample(ex.id)}
+                  style={{ ...retryBtn, padding: "3px 10px", fontSize: 11, flexShrink: 0 }}
+                >
+                  Delete
+                </button>
+              </div>
+            )
+          )}
         </div>
       )}
     </div>
@@ -3010,32 +3171,8 @@ function RawDataTab() {
 }
 
 // ---------- model tab ----------
-// bars must be sorted ascending by tMs (guaranteed by fetchAllRows'
-// orderBy: "ts"). Returns the last bar at or before tMs — never a future
-// bar — so a labeled example is always matched to what was actually known
-// at that moment.
-function nearestBarAtOrBefore(bars, tMs) {
-  let lo = 0, hi = bars.length - 1, ans = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (bars[mid].tMs <= tMs) { ans = mid; lo = mid + 1; }
-    else hi = mid - 1;
-  }
-  return ans >= 0 ? bars[ans] : null;
-}
-
-function sanitizeRules(arr) {
-  if (!Array.isArray(arr)) return [];
-  return arr
-    .filter((r) => r && typeof r === "object" && r.feature)
-    .slice(0, 8)
-    .map((r) => ({
-      feature: String(r.feature),
-      op: ["<", "<=", ">", ">="].includes(r.op) ? r.op : "?",
-      value: r.value,
-      note: typeof r.note === "string" ? r.note : "",
-    }));
-}
+// Synthesized daily by the Claude Code routine (regression + Training Data
+// examples) directly into entry_models — this tab is read-only display.
 
 function fmtRuleValue(v) {
   if (v === null || v === undefined || v === "") return "n/a";
@@ -3079,6 +3216,18 @@ function RuleList({ title, rules }) {
 
 function ModelCard({ model, expanded, onToggle, onDelete }) {
   const rules = model.rules || {};
+  const [pineCopied, setPineCopied] = useState(false);
+
+  async function copyPinescript() {
+    try {
+      await navigator.clipboard.writeText(model.pinescript);
+      setPineCopied(true);
+      setTimeout(() => setPineCopied(false), 1500);
+    } catch {
+      // clipboard failed — the code block is already visible and selectable
+    }
+  }
+
   return (
     <div
       style={{
@@ -3137,6 +3286,53 @@ function ModelCard({ model, expanded, onToggle, onDelete }) {
             <RuleList title="Short entry" rules={rules.short_entry || []} />
             <RuleList title="Exit" rules={rules.exit || []} />
           </div>
+          {model.pinescript && (
+            <div style={{ marginTop: 16 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginBottom: 6,
+                }}
+              >
+                <div
+                  style={{
+                    fontFamily: T.mono,
+                    fontSize: 10,
+                    letterSpacing: "0.12em",
+                    color: T.faint,
+                  }}
+                >
+                  PINESCRIPT
+                </div>
+                <button
+                  onClick={copyPinescript}
+                  style={{ ...retryBtn, borderColor: T.amber, color: T.amber, padding: "3px 10px", fontSize: 11 }}
+                >
+                  {pineCopied ? "Copied!" : "Copy"}
+                </button>
+              </div>
+              <pre
+                style={{
+                  background: T.bg,
+                  border: `1px solid ${T.panelEdge}`,
+                  borderRadius: 8,
+                  padding: 10,
+                  fontSize: 11,
+                  fontFamily: T.mono,
+                  color: T.ink,
+                  overflowX: "auto",
+                  overflowY: "auto",
+                  maxHeight: 280,
+                  whiteSpace: "pre",
+                  margin: 0,
+                }}
+              >
+                {model.pinescript}
+              </pre>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -3147,217 +3343,27 @@ function ModelTab() {
   const [models, setModels] = useState([]);
   const [loadState, setLoadState] = useState("loading");
   const [loadError, setLoadError] = useState(null);
-  const [bars, setBars] = useState(null);
-  const [featureCols, setFeatureCols] = useState([]);
-  const [results, setResults] = useState(null);
-  const [examples, setExamples] = useState([]);
-  const [stage, setStage] = useState("idle");
-  const [pendingPrompt, setPendingPrompt] = useState(null);
-  const [pendingMeta, setPendingMeta] = useState(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [buildError, setBuildError] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
 
   useEffect(() => {
     (async () => {
-      const [modelsRes, examplesRes, barsRowsRes, resultsRes] = await Promise.all([
-        supabase.from("entry_models").select("*").order("generated_at", { ascending: false }),
-        supabase.from("training_examples").select("*"),
-        fetchAllRows("bars", { select: "ts,features", orderBy: "ts" }).catch(() => null),
-        supabase
-          .from("analysis_runs")
-          .select("*")
-          .order("generated_at", { ascending: false })
-          .limit(1)
-          .maybeSingle(),
-      ]);
-
-      if (modelsRes.error) setLoadError(modelsRes.error.message);
-      else setModels(modelsRes.data);
-
-      if (examplesRes.error) setLoadError((e) => e || examplesRes.error.message);
-      else setExamples(examplesRes.data);
-
-      if (barsRowsRes) {
-        const colSet = new Set();
-        const flat = barsRowsRes.map((row) => {
-          const features = row.features || {};
-          Object.keys(features).forEach((k) => colSet.add(k));
-          return { tMs: new Date(row.ts).getTime(), features };
-        });
-        setFeatureCols([...colSet]);
-        setBars(flat);
-      }
-
-      if (resultsRes.data && resultsRes.data.targets) {
-        setResults({
-          generated_at: resultsRes.data.generated_at,
-          ticker: resultsRes.data.ticker,
-          bars_analyzed: resultsRes.data.bars_analyzed,
-          date_range: resultsRes.data.date_range,
-          targets: resultsRes.data.targets,
-          notes: resultsRes.data.notes,
-        });
-      }
-
+      const { data, error } = await supabase
+        .from("entry_models")
+        .select("*")
+        .order("generated_at", { ascending: false });
+      if (error) setLoadError(error.message);
+      else setModels(data);
       setLoadState("ready");
     })();
   }, []);
 
-  function computeTrainingSnapshot() {
-    if (!bars) return null;
-    const snapshots = [];
-    for (const ex of examples) {
-      const tMs = new Date(ex.occurred_at).getTime();
-      const bar = nearestBarAtOrBefore(bars, tMs);
-      if (!bar) continue;
-      snapshots.push({
-        quality: ex.quality,
-        type: ex.type,
-        direction: ex.direction,
-        notes: ex.notes,
-        features: bar.features,
-      });
-    }
-
-    const mean = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
-    const statsByQuality = {};
-    for (const col of featureCols) {
-      const good = snapshots
-        .filter((s) => s.quality === "Good" && s.features[col] != null)
-        .map((s) => s.features[col]);
-      const bad = snapshots
-        .filter((s) => s.quality === "Bad" && s.features[col] != null)
-        .map((s) => s.features[col]);
-      if (good.length && bad.length) {
-        statsByQuality[col] = {
-          mean_good: Math.round(mean(good) * 100) / 100,
-          mean_bad: Math.round(mean(bad) * 100) / 100,
-          n_good: good.length,
-          n_bad: bad.length,
-        };
-      }
-    }
-
-    return {
-      generated_at: new Date().toISOString(),
-      examples_used: snapshots.length,
-      feature_columns: featureCols,
-      example_snapshots: snapshots,
-      feature_stats_by_quality: statsByQuality,
-    };
-  }
-
-  function prepareModelPrompt() {
-    setBuildError(null);
-    try {
-      if (!bars || !results) {
-        throw new Error(
-          "Price/regression data isn't loaded — the bars and analysis_runs tables must be reachable."
-        );
-      }
-      const snap = computeTrainingSnapshot();
-
-      const regressionSummary = {};
-      for (const [tKey, t] of Object.entries(results.targets)) {
-        const top = t.correlations.filter(([, v]) => v !== null).slice(0, 5);
-        regressionSummary[tKey] = {
-          n: t.n,
-          r2_test: t.regression.r2_test,
-          top_correlations: top,
-          std_coefficients_bps: Object.fromEntries(
-            top.map(([f]) => [f, t.regression.std_coefficients_bps[f]])
-          ),
-        };
-      }
-
-      const payload = {
-        bars_analyzed: results.bars_analyzed,
-        date_range: results.date_range,
-        feature_columns: featureCols,
-        examples_used: snap.examples_used,
-        feature_stats_by_quality: snap.feature_stats_by_quality,
-        example_snapshots: snap.example_snapshots,
-        regression_summary: regressionSummary,
-      };
-
-      const prompt = `You are a quantitative trading analyst building an entry/exit rule set for an intraday SPY scalper (break-and-retest methodology). You have two sources of signal: (1) regression/correlation stats from 1-minute SPY data, and (2) the trader's own labeled examples of good/bad entries and exits, each with the exact feature values at that moment. Data:\n\n${JSON.stringify(
-        payload
-      )}\n\nAll *_bps features are basis-point distances (e.g. dist_or5_low_bps = distance from the 5-min opening-range low, dist_prev_day_high_bps = distance from the prior session's high); rsi14 is 0-100; vol_z is a z-score; body_ratio is 0-1; min_since_open is minutes since 9:30 ET open. Only use feature names from feature_columns — never invent one, since these rules get translated mechanically into a trading indicator later. If examples_used is 0, say so explicitly in the summary and derive rules from the regression/correlation stats alone; confidence must be "low" in that case. With fewer than 10 examples, still lean toward "low" or "medium" confidence and say why. Never invent a finding the numbers don't support. Respond with ONLY compact JSON, no fences: {"long_entry": [{"feature": "name", "op": "<"|"<="|">"|">=", "value": number, "note": "under 15 words"}], "short_entry": [...], "exit": [...], "summary": "3-5 sentences, plain language", "confidence": "low"|"medium"|"high"} Max 5 conditions per array.`;
-
-      setPendingPrompt(prompt);
-      setPendingMeta({
-        barsAnalyzed: results.bars_analyzed || 0,
-        examplesUsed: snap.examples_used,
-        dateRange: results.date_range,
-      });
-      setStage("awaiting-paste");
-    } catch (err) {
-      setBuildError(err.message);
-    }
-  }
-
-  function startRoutineBuild() {
-    setBuildError(null);
-    setPendingPrompt(null);
-    setPendingMeta(null);
-    setStage("awaiting-paste");
-  }
-
-  function cancelModelPrompt() {
-    setStage("idle");
-    setPendingPrompt(null);
-    setPendingMeta(null);
-  }
-
-  async function submitModel(modelOut) {
-    setBuildError(null);
-    setSubmitting(true);
-    try {
-      const rules = {
-        long_entry: sanitizeRules(modelOut.long_entry),
-        short_entry: sanitizeRules(modelOut.short_entry),
-        exit: sanitizeRules(modelOut.exit),
-      };
-      const confidence = ["low", "medium", "high"].includes(modelOut.confidence)
-        ? modelOut.confidence
-        : "low";
-
-      // Local builds set pendingMeta from data already loaded here; routine
-      // builds skip that (no data is fetched client-side for that path) and
-      // instead self-report bars_analyzed/examples_used/date_range in their
-      // own response, since the routine reads the source files itself.
-      const { data, error } = await supabase
-        .from("entry_models")
-        .insert({
-          bars_analyzed: modelOut.bars_analyzed ?? pendingMeta?.barsAnalyzed ?? 0,
-          examples_used: modelOut.examples_used ?? pendingMeta?.examplesUsed ?? 0,
-          date_range: modelOut.date_range ?? pendingMeta?.dateRange ?? null,
-          rules,
-          summary: typeof modelOut.summary === "string" ? modelOut.summary : "",
-          confidence,
-        })
-        .select()
-        .single();
-      if (error) throw new Error(error.message);
-      setModels([data, ...models]);
-      setExpandedId(data.id);
-      setStage("idle");
-      setPendingPrompt(null);
-      setPendingMeta(null);
-    } catch (err) {
-      setBuildError(err.message);
-    }
-    setSubmitting(false);
-  }
-
   async function deleteModel(id) {
-    setBuildError(null);
+    setLoadError(null);
     const prev = models;
     setModels(models.filter((m) => m.id !== id));
     const { error } = await supabase.from("entry_models").delete().eq("id", id);
     if (error) {
-      setBuildError(error.message);
+      setLoadError(error.message);
       setModels(prev);
     }
   }
@@ -3373,85 +3379,18 @@ function ModelTab() {
   return (
     <div>
       <div style={{ fontSize: 12, color: T.dim, marginBottom: 14 }}>
-        Synthesizes an entry/exit rule set from the 30-day regression output plus
-        your Training Data examples. Each build is saved as a new version, so you
-        can watch it evolve as you log more examples.
+        Synthesized daily by the routine from the regression output plus your
+        Training Data examples. Each run adds a new version below, along
+        with a PineScript indicator you can paste into TradingView.
       </div>
       {loadError && (
         <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>{loadError}</div>
       )}
-      {buildError && (
-        <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>{buildError}</div>
-      )}
-
-      <div
-        style={{
-          background: T.panel,
-          border: `1px solid ${T.panelEdge}`,
-          borderRadius: 10,
-          padding: 14,
-          marginBottom: 14,
-          display: "flex",
-          alignItems: "center",
-          gap: 14,
-          flexWrap: "wrap",
-        }}
-      >
-        <button
-          onClick={prepareModelPrompt}
-          disabled={!bars || !results || stage === "awaiting-paste"}
-          style={{
-            background: T.amber,
-            color: "#141414",
-            border: "none",
-            borderRadius: 8,
-            padding: "9px 18px",
-            fontSize: 13,
-            fontWeight: 700,
-            cursor: !bars || !results || stage === "awaiting-paste" ? "default" : "pointer",
-            fontFamily: T.sans,
-            opacity: !bars || !results || stage === "awaiting-paste" ? 0.6 : 1,
-          }}
-        >
-          Build model
-        </button>
-        <button
-          onClick={startRoutineBuild}
-          disabled={stage === "awaiting-paste"}
-          title="Paste the output of a Claude Code routine that reads the analysis_runs/bars tables and your training_examples directly from Supabase, plus smaug_pipeline.py from GitHub"
-          style={{
-            ...retryBtn,
-            borderColor: T.amber,
-            color: stage === "awaiting-paste" ? T.faint : T.amber,
-            padding: "9px 14px",
-            cursor: stage === "awaiting-paste" ? "default" : "pointer",
-          }}
-        >
-          Build via routine
-        </button>
-        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
-          {examples.length} training example{examples.length === 1 ? "" : "s"} logged
-          {!bars && " · bars data unavailable"}
-          {!results && " · regression results unavailable"}
-        </span>
-      </div>
-
-      {stage === "awaiting-paste" && (
-        <div style={{ marginBottom: 14 }}>
-          <CopyPasteAI
-            prompt={pendingPrompt}
-            onSubmit={submitModel}
-            onCancel={cancelModelPrompt}
-            showPromptBox={!!pendingPrompt}
-          />
-          {submitting && (
-            <div style={{ fontSize: 12, color: T.dim, marginTop: 6 }}>Saving…</div>
-          )}
-        </div>
-      )}
 
       {models.length === 0 ? (
-        <div style={{ color: T.dim, fontSize: 13 }}>No model built yet.</div>
+        <div style={{ color: T.dim, fontSize: 13 }}>
+          No model yet — the daily routine will populate this.
+        </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <ModelCard model={models[0]} onDelete={() => deleteModel(models[0].id)} />

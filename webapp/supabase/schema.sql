@@ -22,11 +22,14 @@ create policy "journal_entries_owner_all"
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
+-- Each row is one full labeled trade: an entry moment and an exit moment,
+-- so the model can learn from feature values at both points.
 create table if not exists training_examples (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
-  occurred_at timestamptz not null,
-  type text not null check (type in ('Entry', 'Exit')),
+  entry_at timestamptz not null,
+  exit_at timestamptz not null,
+  ticker text not null default 'SPY',
   direction text not null check (direction in ('Long', 'Short')),
   quality text not null check (quality in ('Good', 'Bad')),
   notes text default '',
@@ -54,7 +57,8 @@ create table if not exists entry_models (
   rules jsonb not null,
   summary text default '',
   confidence text not null check (confidence in ('low', 'medium', 'high')),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  pinescript text default ''
 );
 
 alter table entry_models enable row level security;
