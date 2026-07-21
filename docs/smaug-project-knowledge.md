@@ -5,10 +5,19 @@ Pin this to the claude.ai Project's knowledge so daily conversations don't need 
 ## What this is
 Smaug is a personal intraday SPY options scalping tool. The trader uses a **break-and-retest methodology with confluence scoring and ATR-based stops**. A daily Python pipeline pulls SPY 1-minute bars (pre-market + regular trading hours, 30-day retention), computes indicator features, and runs regression/correlation analysis against forward-return targets. A companion webapp lets the trader log actual trades (Journal), log labeled good/bad entry & exit examples (Training Data), and synthesize an "entry model" (structured rule set) from the two combined.
 
-## Data sources (public GitHub repo — fetch directly, always current)
-- `https://raw.githubusercontent.com/mdmeck/Smaug/main/smaug_bars.json` — 30-day window of 1-min OHLCV + every computed feature, per bar. Shape: `{"ticker": "SPY", "feature_cols": [...], "bars": [[ts, open, high, low, close, volume, ...feature values in feature_cols order], ...]}`.
-- `https://raw.githubusercontent.com/mdmeck/Smaug/main/smaug_results.json` — daily regression/correlation output. Shape: `{"generated_at", "ticker", "bars_analyzed", "date_range": [start, end], "targets": {"<target_key>": {"n", "correlations": [[feature, corr_or_null], ...], "regression": {"intercept_bps", "std_coefficients_bps": {feature: coef}, "r2_train", "r2_test"}, "deciles": {feature: [{"decile", "avg_move_bps", "n"}]}}}}`.
+## Data sources
+
+**GitHub (public repo, fetch directly — pipeline source only):**
 - `https://raw.githubusercontent.com/mdmeck/Smaug/main/smaug_pipeline.py` — the actual pipeline source. `compute_features()` is the ground truth for exactly how every feature below is calculated; `compute_targets()` for the targets.
+
+**Supabase (query via your Supabase connector, not a plain URL):**
+- `bars` — 1-minute SPY bars + computed features, ~30-day retained window (~8,000 rows). Columns: `ts, ticker, open, high, low, close, volume, features` (jsonb — keys are the feature names below). Public read — no auth needed, but there are far more than 1000 rows, so page through with `.range()`/`limit`+`offset` rather than assuming one query returns everything.
+- `analysis_runs` — daily regression/correlation output. One row per pipeline run (append-only — query `order by generated_at desc limit 1` for the current one). Columns: `generated_at, ticker, bars_analyzed, date_range, targets (jsonb), notes`. Public read, same as `bars`.
+- `training_examples` — the trader's labeled good/bad entry & exit examples: `occurred_at, type (Entry/Exit), direction (Long/Short), quality (Good/Bad), notes`. **Private, RLS-protected** — only readable when your connector is authenticated as the trader. May be empty.
+- `daily_briefs` — morning brief (econ calendar, earnings, sentiment, bull/bear case), written by a routine: `generated_at, econ (jsonb), earnings (jsonb), sentiment (jsonb), cases (jsonb)`. Private, same auth requirement as `training_examples`. Query `order by generated_at desc limit 1` for the current one, or insert a new row to publish today's.
+- `entry_models` — each row is one AI-synthesized entry/exit rule set, written by the webapp when the trader pastes a routine's output back in (not written directly by a routine today). Private, same auth requirement: `generated_at, bars_analyzed, examples_used, date_range, rules (jsonb), summary, confidence (low/medium/high)`.
+
+To join a training example to its feature values: find the `bars` row with the largest `ts <= occurred_at` (never a later bar — that would be lookahead) and read its `features`.
 
 ## Feature columns (all stationary — returns/spreads/ratios/bps-distances, never raw price levels)
 | feature | meaning |
@@ -36,11 +45,6 @@ All `dist_*`/`ret_*`/`range_bps`/`ema_spread_bps` features are causal — comput
 | `fwd_5m_bps` / `fwd_10m_bps` / `fwd_15m_bps` | forward return N minutes ahead, in bps, same-session only |
 | `mfe_10m_bps` | max favorable excursion (long side) over the next 10 minutes, in bps |
 
-## Supabase tables (RLS-protected — NOT fetchable via a plain URL; the trader's session data must be pasted in, not linked)
-- `journal_entries` — actual trades taken: `date, ticker, direction (Long/Short), setup, result, notes`.
-- `training_examples` — labeled good/bad entry & exit examples for model training (distinct from the journal — this is training data, not trades taken): `occurred_at, type (Entry/Exit), direction (Long/Short), quality (Good/Bad), notes`.
-- `entry_models` — each row is one AI-synthesized entry/exit rule set, versioned over time (not overwritten): `generated_at, bars_analyzed, examples_used, date_range, rules jsonb, summary, confidence (low/medium/high)`.
-
 ## Entry-model output schema
 When asked to synthesize/update the entry model, respond with ONLY this JSON shape:
 ```json
@@ -49,7 +53,11 @@ When asked to synthesize/update the entry model, respond with ONLY this JSON sha
   "short_entry": [...],
   "exit": [...],
   "summary": "3-5 sentences, plain language",
-  "confidence": "low|medium|high"
+  "confidence": "low|medium|high",
+  "bars_analyzed": number,
+  "examples_used": number,
+  "date_range": [start, end]
 }
 ```
+The last three fields should echo whatever you actually read from `analysis_runs`/`training_examples` — the webapp uses them as-is when saving the model version, so they should reflect what was really used, not be omitted or guessed.
 Only use feature names from the table above — never invent one, since these rules get translated mechanically into a PineScript trading indicator. If there are zero or very few training examples, say so explicitly in the summary and lean on the regression/decile output instead; confidence must be "low" in that case. Never invent a finding the numbers don't support.

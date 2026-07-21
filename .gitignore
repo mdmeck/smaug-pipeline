@@ -3,3 +3,13 @@ __pycache__/
 .venv/
 webapp/node_modules/
 webapp/dist/
+
+# pipeline output — now lives in Supabase (bars/analysis_runs tables),
+# these are local-only debug artifacts
+spy_1m.db
+smaug_bars.json
+smaug_results.json
+smaug_report.txt
+
+# morning brief — now lives in Supabase (daily_briefs table)
+smaug_brief.json

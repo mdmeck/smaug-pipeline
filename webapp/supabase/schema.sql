@@ -64,3 +64,68 @@ create policy "entry_models_owner_all"
   for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+-- Daily brief (econ calendar, earnings, sentiment, bull/bear case), written
+-- by the Claude Code routine via its authenticated Supabase connector.
+-- Private like the tables above — the routine authenticates as the owning
+-- user, so there's no need to expose this publicly.
+create table if not exists daily_briefs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  generated_at timestamptz not null default now(),
+  econ jsonb,
+  earnings jsonb,
+  sentiment jsonb,
+  cases jsonb,
+  created_at timestamptz not null default now()
+);
+
+alter table daily_briefs enable row level security;
+
+create policy "daily_briefs_owner_all"
+  on daily_briefs
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- 1-minute SPY bars + computed indicator features. Public read (this is
+-- just market data, not personal) so both the webapp and the routine can
+-- read it without authentication; writes only via the service_role key,
+-- used exclusively by the GitHub Actions pipeline — never client-side.
+create table if not exists bars (
+  ts timestamptz primary key,
+  ticker text not null default 'SPY',
+  open double precision not null,
+  high double precision not null,
+  low double precision not null,
+  close double precision not null,
+  volume bigint not null,
+  features jsonb
+);
+
+alter table bars enable row level security;
+
+create policy "bars_public_read"
+  on bars
+  for select
+  using (true);
+
+-- Daily regression/correlation output. One row per pipeline run
+-- (append-only, like entry_models, so you can see how the analysis
+-- evolves) — public read, same reasoning and write restriction as bars.
+create table if not exists analysis_runs (
+  id uuid primary key default gen_random_uuid(),
+  generated_at timestamptz not null default now(),
+  ticker text not null default 'SPY',
+  bars_analyzed int not null default 0,
+  date_range jsonb,
+  targets jsonb not null,
+  notes jsonb default '[]'::jsonb
+);
+
+alter table analysis_runs enable row level security;
+
+create policy "analysis_runs_public_read"
+  on analysis_runs
+  for select
+  using (true);

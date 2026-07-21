@@ -2,6 +2,26 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { createChart, CandlestickSeries } from "lightweight-charts";
 import { supabase } from "./supabaseClient.js";
 
+// ---------- supabase helpers ----------
+// PostgREST (and supabase-js) caps a single response at 1000 rows by
+// default — bars/analysis_runs can far exceed that, so every read needs
+// to page through with .range() until a short page signals the end.
+async function fetchAllRows(table, { select = "*", orderBy, ascending = true } = {}) {
+  const pageSize = 1000;
+  let offset = 0;
+  const all = [];
+  for (;;) {
+    let query = supabase.from(table).select(select).range(offset, offset + pageSize - 1);
+    if (orderBy) query = query.order(orderBy, { ascending });
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    all.push(...data);
+    if (data.length < pageSize) break;
+    offset += pageSize;
+  }
+  return all;
+}
+
 // ---------- theme (Apex Forge) ----------
 const T = {
   bg: "#141414",
@@ -64,11 +84,12 @@ function tradingWeek() {
   });
 }
 
-function weekRangeText() {
+function monthYearText() {
   const week = tradingWeek();
-  const fmt = (d) =>
-    d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  return `${fmt(week[0].date)} – ${fmt(week[4].date)}, ${week[4].date.getFullYear()}`;
+  return week[0].date.toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
 }
 
 function isToday(date) {
@@ -105,21 +126,6 @@ function parseJsonLoose(text) {
     }
   }
   throw new Error("Incomplete JSON in response");
-}
-
-// ---------- prompts ----------
-function buildMorningBriefPrompt() {
-  const date = todayLabel();
-  const range = weekRangeText();
-  return `You are preparing a morning trading brief for an intraday SPY options scalper (break-and-retest methodology). Search the web and research all four sections below for the trading week of ${range} / today (${date}):
-
-1. ECON CALENDAR: US economic calendar for the week — the schedule shown on sites like Forex Factory. USD events only, medium and high impact only (Fed speakers, CPI, PPI, jobs data, PMI, FOMC, auctions, consumer sentiment, etc). Max 18 events across the week, each day's events sorted by time.
-2. EARNINGS: Major companies reporting earnings this week, with special focus on tech and semiconductor companies plus any mega-caps that move the S&P 500. Max 12 across the week, empty array if nothing major.
-3. SENTIMENT: Current pre-market / overnight US market sentiment for today — S&P 500 futures direction and %, VIX level, CNN Fear & Greed index, and any major overnight headlines moving markets.
-4. BULL/BEAR CASE: Latest news and analyst commentary relevant to SPY / the S&P 500 today. Build a same-day bull case and bear case, each point under 15 words.
-
-Respond with ONLY compact JSON, no preamble, no markdown fences, no commentary before or after, every string short. Schema:
-{"econ": {"events": [{"day": "Mon|Tue|Wed|Thu|Fri", "time_et": "8:30 AM", "event": "name", "impact": "high|medium", "forecast": "or empty string", "previous": "or empty string"}]}, "earnings": {"earnings": [{"day": "Mon|Tue|Wed|Thu|Fri", "ticker": "ABC", "company": "name", "time": "BMO|AMC", "note": "why it matters, under 8 words"}]}, "sentiment": {"futures": "e.g. ES +0.3%", "vix": "e.g. 14.2, falling", "fear_greed": "e.g. 62 - Greed", "overnight": "one line on overnight action", "summary": "2 sentences max on the tape's tone", "tone": "bullish|bearish|neutral"}, "cases": {"bull": ["point 1", "point 2", "point 3"], "bear": ["point 1", "point 2", "point 3"], "watch": "single most important thing to watch today, one line"}}`;
 }
 
 // ---------- clock ----------
@@ -202,26 +208,28 @@ const inputStyle = {
   boxSizing: "border-box",
 };
 
-function ImpactDot({ impact }) {
-  const c = impact === "high" ? T.red : impact === "medium" ? T.amber : T.faint;
+function ImpactEmoji({ impact }) {
+  const isRed = impact === "high";
   return (
     <span
       style={{
-        width: 7,
-        height: 7,
-        borderRadius: "50%",
-        background: c,
+        fontSize: 13,
+        lineHeight: 1,
         display: "inline-block",
         flexShrink: 0,
-        marginTop: 5,
+        filter: isRed
+          ? "hue-rotate(-50deg) saturate(2.2) brightness(0.95)"
+          : "none",
       }}
-      title={impact}
-    />
+      title={isRed ? "red folder — high impact" : impact}
+    >
+      📁
+    </span>
   );
 }
 
 // ---------- week calendar ----------
-function WeekCalendar({ econ, earnings }) {
+function WeekCalendar({ econ, earnings, lastRun }) {
   const week = tradingWeek();
   const econEvents = (econ && econ.events) || [];
   const earnRows = (earnings && earnings.earnings) || [];
@@ -248,20 +256,16 @@ function WeekCalendar({ econ, earnings }) {
         }}
       >
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span
-            style={{
-              fontFamily: T.mono,
-              fontSize: 11,
-              letterSpacing: "0.12em",
-              color: T.amber,
-            }}
-          >
-            01
-          </span>
-          <span style={{ fontSize: 14, fontWeight: 600, color: T.ink }}>
-            The week — {weekRangeText()}
+          <span style={{ fontSize: 16, fontWeight: 600, color: T.ink }}>
+            {monthYearText()}
           </span>
         </div>
+        {lastRun && (
+          <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>
+            Last run{" "}
+            {lastRun.toLocaleTimeString("en-US", { hour12: false })} ET
+          </div>
+        )}
       </div>
 
       {nothingYet ? (
@@ -280,8 +284,8 @@ function WeekCalendar({ econ, earnings }) {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(5, minmax(170px, 1fr))",
-              minWidth: 860,
+              gridTemplateColumns: "repeat(5, minmax(195px, 1fr))",
+              minWidth: 975,
             }}
           >
             {week.map((day, i) => {
@@ -301,7 +305,7 @@ function WeekCalendar({ econ, earnings }) {
                 >
                   <div
                     style={{
-                      padding: "8px 10px",
+                      padding: "10px 12px",
                       borderBottom: `1px solid ${T.panelEdge}`,
                       display: "flex",
                       alignItems: "baseline",
@@ -313,9 +317,7 @@ function WeekCalendar({ econ, earnings }) {
                   >
                     <span
                       style={{
-                        fontFamily: T.mono,
-                        fontSize: 11,
-                        letterSpacing: "0.1em",
+                        fontSize: 13,
                         color: today ? T.amber : T.dim,
                         fontWeight: today ? 700 : 400,
                       }}
@@ -324,8 +326,7 @@ function WeekCalendar({ econ, earnings }) {
                     </span>
                     <span
                       style={{
-                        fontFamily: T.mono,
-                        fontSize: 11,
+                        fontSize: 13,
                         color: today ? T.ink : T.faint,
                       }}
                     >
@@ -335,9 +336,7 @@ function WeekCalendar({ econ, earnings }) {
                       <span
                         style={{
                           marginLeft: "auto",
-                          fontFamily: T.mono,
-                          fontSize: 9,
-                          letterSpacing: "0.14em",
+                          fontSize: 13,
                           color: T.amber,
                         }}
                       >
@@ -346,12 +345,11 @@ function WeekCalendar({ econ, earnings }) {
                     )}
                   </div>
 
-                  <div style={{ padding: "8px 10px", flex: 1 }}>
+                  <div style={{ padding: "10px 12px", flex: 1 }}>
                     {econ && dayEcon.length === 0 && (
                       <div
                         style={{
-                          fontFamily: T.mono,
-                          fontSize: 10,
+                          fontSize: 13,
                           color: T.faint,
                         }}
                       >
@@ -362,36 +360,45 @@ function WeekCalendar({ econ, earnings }) {
                       style={{
                         display: "flex",
                         flexDirection: "column",
-                        gap: 7,
+                        gap: 8,
                       }}
                     >
                       {dayEcon.map((e, j) => (
                         <div key={j} style={{ display: "flex", gap: 7 }}>
-                          <ImpactDot impact={e.impact} />
+                          <ImpactEmoji impact={e.impact} />
                           <div style={{ minWidth: 0 }}>
                             <div
                               style={{
-                                fontFamily: T.mono,
-                                fontSize: 10,
-                                color: T.amber,
+                                display: "flex",
+                                alignItems: "baseline",
+                                gap: 6,
+                                flexWrap: "wrap",
                               }}
                             >
-                              {e.time_et}
-                            </div>
-                            <div
-                              style={{
-                                fontSize: 12,
-                                color: T.ink,
-                                lineHeight: 1.3,
-                              }}
-                            >
-                              {e.event}
+                              <span
+                                style={{
+                                  fontSize: 13,
+                                  fontWeight: 700,
+                                  color: T.amber,
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {e.time_et}
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: 13,
+                                  color: T.ink,
+                                  lineHeight: 1.3,
+                                }}
+                              >
+                                {e.event}
+                              </span>
                             </div>
                             {(e.forecast || e.previous) && (
                               <div
                                 style={{
-                                  fontFamily: T.mono,
-                                  fontSize: 10,
+                                  fontSize: 13,
                                   color: T.faint,
                                 }}
                               >
@@ -415,17 +422,6 @@ function WeekCalendar({ econ, earnings }) {
                       >
                         <div
                           style={{
-                            fontFamily: T.mono,
-                            fontSize: 9,
-                            letterSpacing: "0.14em",
-                            color: T.blue,
-                            marginBottom: 6,
-                          }}
-                        >
-                          EARNINGS
-                        </div>
-                        <div
-                          style={{
                             display: "flex",
                             flexDirection: "column",
                             gap: 5,
@@ -436,15 +432,24 @@ function WeekCalendar({ econ, earnings }) {
                               key={j}
                               title={e.note || e.company}
                               style={{
-                                display: "flex",
+                                display: "grid",
+                                gridTemplateColumns: "18px 46px 36px 1fr",
                                 alignItems: "baseline",
                                 gap: 6,
                               }}
                             >
                               <span
                                 style={{
-                                  fontFamily: T.mono,
-                                  fontSize: 11,
+                                  fontSize: 13,
+                                  lineHeight: 1,
+                                }}
+                              >
+                                💸
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: 13,
+                                  fontWeight: 700,
                                   color: T.blue,
                                 }}
                               >
@@ -452,22 +457,21 @@ function WeekCalendar({ econ, earnings }) {
                               </span>
                               <span
                                 style={{
-                                  fontFamily: T.mono,
-                                  fontSize: 9,
+                                  fontSize: 13,
                                   color: T.faint,
                                 }}
                               >
                                 {e.time}
                               </span>
-                              {e.note && (
+                              {e.company && (
                                 <span
                                   style={{
-                                    fontSize: 10,
+                                    fontSize: 13,
                                     color: T.dim,
                                     lineHeight: 1.3,
                                   }}
                                 >
-                                  {e.note}
+                                  {e.company}
                                 </span>
                               )}
                             </div>
@@ -487,7 +491,7 @@ function WeekCalendar({ econ, earnings }) {
 }
 
 // ---------- generic panel ----------
-function Panel({ title, tag, hasData, children }) {
+function Panel({ title, hasData, children }) {
   return (
     <div
       style={{
@@ -509,21 +513,9 @@ function Panel({ title, tag, hasData, children }) {
           borderBottom: `1px solid ${T.panelEdge}`,
         }}
       >
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span
-            style={{
-              fontFamily: T.mono,
-              fontSize: 11,
-              letterSpacing: "0.12em",
-              color: T.amber,
-            }}
-          >
-            {tag}
-          </span>
-          <span style={{ fontSize: 14, fontWeight: 600, color: T.ink }}>
-            {title}
-          </span>
-        </div>
+        <span style={{ fontSize: 14, fontWeight: 600, color: T.ink }}>
+          {title}
+        </span>
       </div>
       <div style={{ padding: 14, flex: 1, fontSize: 13 }}>
         {hasData ? (
@@ -539,7 +531,7 @@ function Panel({ title, tag, hasData, children }) {
 }
 
 // ---------- copy/paste AI exchange (uses claude.ai directly — no metered API key) ----------
-function CopyPasteAI({ prompt, onSubmit, onCancel }) {
+function CopyPasteAI({ prompt, onSubmit, onCancel, showPromptBox = true }) {
   const [text, setText] = useState("");
   const [copied, setCopied] = useState(false);
   const [err, setErr] = useState(null);
@@ -579,25 +571,36 @@ function CopyPasteAI({ prompt, onSubmit, onCancel }) {
       }}
     >
       <div style={{ fontSize: 12, color: T.dim }}>
-        Copy this prompt into claude.ai, then paste Claude's response below.
+        {showPromptBox
+          ? "Copy this prompt into claude.ai, then paste Claude's response below."
+          : "Paste the response below."}
       </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <button
-          onClick={copyPrompt}
-          style={{ ...retryBtn, borderColor: T.amber, color: T.amber }}
-        >
-          {copied ? "Copied!" : "Copy prompt"}
-        </button>
-        <button onClick={() => setShowPrompt((s) => !s)} style={retryBtn}>
-          {showPrompt ? "Hide prompt" : "Show prompt"}
-        </button>
-        {onCancel && (
+      {showPromptBox && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button
+            onClick={copyPrompt}
+            style={{ ...retryBtn, borderColor: T.amber, color: T.amber }}
+          >
+            {copied ? "Copied!" : "Copy prompt"}
+          </button>
+          <button onClick={() => setShowPrompt((s) => !s)} style={retryBtn}>
+            {showPrompt ? "Hide prompt" : "Show prompt"}
+          </button>
+          {onCancel && (
+            <button onClick={onCancel} style={retryBtn}>
+              Cancel
+            </button>
+          )}
+        </div>
+      )}
+      {!showPromptBox && onCancel && (
+        <div>
           <button onClick={onCancel} style={retryBtn}>
             Cancel
           </button>
-        )}
-      </div>
-      {showPrompt && (
+        </div>
+      )}
+      {showPromptBox && showPrompt && (
         <textarea
           readOnly
           value={prompt}
@@ -748,52 +751,10 @@ function CasesBody({ data }) {
 }
 
 // ---------- Morning Brief tab ----------
-function MorningBriefTab({ panels, stage, prompt, runAll, submitBrief, cancelBrief, lastRun }) {
+function MorningBriefTab({ panels, lastRun }) {
   return (
     <div>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-          marginBottom: 14,
-        }}
-      >
-        <div style={{ fontSize: 13, color: T.dim }}>
-          {lastRun
-            ? `Last run ${lastRun.toLocaleTimeString("en-US", {
-                hour12: false,
-              })} ET`
-            : "Run once each morning before the open."}
-        </div>
-        <button
-          onClick={runAll}
-          disabled={stage === "awaiting-paste"}
-          style={{
-            background: stage === "awaiting-paste" ? T.panelEdge : T.amber,
-            color: stage === "awaiting-paste" ? T.dim : "#141414",
-            border: "none",
-            borderRadius: 8,
-            padding: "10px 20px",
-            fontSize: 14,
-            fontWeight: 700,
-            cursor: stage === "awaiting-paste" ? "default" : "pointer",
-            fontFamily: T.sans,
-            flexShrink: 0,
-          }}
-        >
-          {lastRun ? "Refresh prep" : "Run morning prep"}
-        </button>
-      </div>
-
-      {stage === "awaiting-paste" && (
-        <div style={{ marginBottom: 14 }}>
-          <CopyPasteAI prompt={prompt} onSubmit={submitBrief} onCancel={cancelBrief} />
-        </div>
-      )}
-
-      <WeekCalendar econ={panels.econ} earnings={panels.earnings} />
+      <WeekCalendar econ={panels.econ} earnings={panels.earnings} lastRun={lastRun} />
 
       <div
         style={{
@@ -803,10 +764,10 @@ function MorningBriefTab({ panels, stage, prompt, runAll, submitBrief, cancelBri
           marginTop: 14,
         }}
       >
-        <Panel tag="02" title="Market sentiment" hasData={!!panels.sentiment}>
+        <Panel title="Market sentiment" hasData={!!panels.sentiment}>
           {panels.sentiment && <SentimentBody data={panels.sentiment} />}
         </Panel>
-        <Panel tag="03" title="Bull vs. bear — SPY" hasData={!!panels.cases}>
+        <Panel title="Bull vs. bear — SPY" hasData={!!panels.cases}>
           {panels.cases && <CasesBody data={panels.cases} />}
         </Panel>
       </div>
@@ -949,25 +910,7 @@ function AuthGate({ children }) {
     );
   }
 
-  return (
-    <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "flex-end",
-          marginBottom: 10,
-        }}
-      >
-        <button
-          onClick={() => supabase.auth.signOut()}
-          style={{ ...retryBtn, padding: "3px 10px", fontSize: 11 }}
-        >
-          Sign out ({session.user.email})
-        </button>
-      </div>
-      {children}
-    </div>
-  );
+  return children;
 }
 
 // ---------- Journal tab ----------
@@ -2132,14 +2075,15 @@ function TechnicalsTab() {
   useEffect(() => {
     (async () => {
       try {
-        const resp = await fetch(import.meta.env.BASE_URL + "smaug_bars.json");
-        if (!resp.ok) return;
-        const parsed = await resp.json();
+        const rows = await fetchAllRows("bars", {
+          select: "ts,open,high,low,close,volume",
+          orderBy: "ts",
+        });
         const byDay = new Map();
-        for (const [ts, o, h, l, c, v] of parsed.bars) {
-          const day = ts.slice(0, 10);
+        for (const r of rows) {
+          const day = r.ts.slice(0, 10);
           if (!byDay.has(day)) byDay.set(day, []);
-          byDay.get(day).push({ ts, o, h, l, c, v });
+          byDay.get(day).push({ ts: r.ts, o: r.open, h: r.high, l: r.low, c: r.close, v: r.volume });
         }
         const days = [...byDay.keys()].sort();
         setDayBars({ days, byDay });
@@ -2153,9 +2097,21 @@ function TechnicalsTab() {
   useEffect(() => {
     (async () => {
       try {
-        const resp = await fetch(import.meta.env.BASE_URL + "smaug_results.json");
-        if (resp.ok) {
-          const parsed = await resp.json();
+        const { data } = await supabase
+          .from("analysis_runs")
+          .select("*")
+          .order("generated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (data) {
+          const parsed = {
+            generated_at: data.generated_at,
+            ticker: data.ticker,
+            bars_analyzed: data.bars_analyzed,
+            date_range: data.date_range,
+            targets: data.targets,
+            notes: data.notes,
+          };
           if (!validateResults(parsed)) {
             setResults(parsed);
             setTarget(Object.keys(parsed.targets)[0]);
@@ -2751,13 +2707,14 @@ function ResourcesTab() {
         { label: "Folder", value: "~/Projects/StockModeling/smaug/" },
         { label: "Script", value: "smaug_pipeline.py" },
         { label: "Run", value: "python smaug_pipeline.py" },
-        { label: "Outputs", value: "smaug_results.json · smaug_report.txt" },
+        { label: "Outputs", value: "Supabase: bars, analysis_runs tables" },
         { label: "Schedule", value: "Daily 4:15 PM ET (see README)" },
       ],
-      note: "Results JSON gets pasted into the Modeling tab.",
+      note: "Modeling and Raw Data read live from Supabase — no manual paste needed.",
     },
   ];
   return (
+    <div>
     <div
       style={{
         display: "grid",
@@ -2858,6 +2815,22 @@ function ResourcesTab() {
         </div>
       ))}
     </div>
+
+    <div style={{ marginTop: 24 }}>
+      <div
+        style={{
+          fontFamily: T.mono,
+          fontSize: 10,
+          letterSpacing: "0.14em",
+          color: T.amber,
+          marginBottom: 10,
+        }}
+      >
+        RAW DATA
+      </div>
+      <RawDataTab />
+    </div>
+    </div>
   );
 }
 
@@ -2870,23 +2843,21 @@ function RawDataTab() {
   useEffect(() => {
     (async () => {
       try {
-        const resp = await fetch(import.meta.env.BASE_URL + "smaug_bars.json");
-        if (resp.ok) {
-          const parsed = await resp.json();
-          const featureCols = parsed.feature_cols || [];
-          const byDay = new Map();
-          for (const row of parsed.bars) {
-            const [ts, o, h, l, c, v, ...featureVals] = row;
-            const day = ts.slice(0, 10);
-            if (!byDay.has(day)) byDay.set(day, []);
-            const features = {};
-            featureCols.forEach((name, i) => (features[name] = featureVals[i]));
-            byDay.get(day).push({ ts, o, h, l, c, v, features });
-          }
-          const days = [...byDay.keys()].sort();
-          setDayBars({ days, byDay, featureCols });
-          setDayIndex(days.length - 1);
+        const rows = await fetchAllRows("bars", { orderBy: "ts" });
+        const featureColSet = new Set();
+        const byDay = new Map();
+        for (const row of rows) {
+          const day = row.ts.slice(0, 10);
+          if (!byDay.has(day)) byDay.set(day, []);
+          const features = row.features || {};
+          Object.keys(features).forEach((k) => featureColSet.add(k));
+          byDay.get(day).push({
+            ts: row.ts, o: row.open, h: row.high, l: row.low, c: row.close, v: row.volume, features,
+          });
         }
+        const days = [...byDay.keys()].sort();
+        setDayBars({ days, byDay, featureCols: [...featureColSet] });
+        setDayIndex(days.length - 1);
       } catch {
         // no bar data available
       }
@@ -2905,7 +2876,7 @@ function RawDataTab() {
   if (!dayBars || dayBars.days.length === 0) {
     return (
       <div style={{ color: T.dim, fontSize: 13 }}>
-        No bar data found. Run the pipeline to generate smaug_bars.json.
+        No bar data found. Run the pipeline to populate the bars table.
       </div>
     );
   }
@@ -3039,8 +3010,8 @@ function RawDataTab() {
 }
 
 // ---------- model tab ----------
-// bars must be sorted ascending by tMs (true of smaug_bars.json as written
-// by the pipeline). Returns the last bar at or before tMs — never a future
+// bars must be sorted ascending by tMs (guaranteed by fetchAllRows'
+// orderBy: "ts"). Returns the last bar at or before tMs — never a future
 // bar — so a labeled example is always matched to what was actually known
 // at that moment.
 function nearestBarAtOrBefore(bars, tMs) {
@@ -3189,11 +3160,16 @@ function ModelTab() {
 
   useEffect(() => {
     (async () => {
-      const [modelsRes, examplesRes, barsResp, resultsResp] = await Promise.all([
+      const [modelsRes, examplesRes, barsRowsRes, resultsRes] = await Promise.all([
         supabase.from("entry_models").select("*").order("generated_at", { ascending: false }),
         supabase.from("training_examples").select("*"),
-        fetch(import.meta.env.BASE_URL + "smaug_bars.json").catch(() => null),
-        fetch(import.meta.env.BASE_URL + "smaug_results.json").catch(() => null),
+        fetchAllRows("bars", { select: "ts,features", orderBy: "ts" }).catch(() => null),
+        supabase
+          .from("analysis_runs")
+          .select("*")
+          .order("generated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
       ]);
 
       if (modelsRes.error) setLoadError(modelsRes.error.message);
@@ -3202,69 +3178,85 @@ function ModelTab() {
       if (examplesRes.error) setLoadError((e) => e || examplesRes.error.message);
       else setExamples(examplesRes.data);
 
-      if (barsResp && barsResp.ok) {
-        const parsed = await barsResp.json();
-        const cols = parsed.feature_cols || [];
-        setFeatureCols(cols);
-        const flat = parsed.bars.map((row) => {
-          const [ts, , , , , , ...featureVals] = row;
-          const features = {};
-          cols.forEach((name, i) => { features[name] = featureVals[i]; });
-          return { tMs: new Date(ts).getTime(), features };
+      if (barsRowsRes) {
+        const colSet = new Set();
+        const flat = barsRowsRes.map((row) => {
+          const features = row.features || {};
+          Object.keys(features).forEach((k) => colSet.add(k));
+          return { tMs: new Date(row.ts).getTime(), features };
         });
+        setFeatureCols([...colSet]);
         setBars(flat);
       }
 
-      if (resultsResp && resultsResp.ok) {
-        const parsed = await resultsResp.json();
-        if (parsed && parsed.targets) setResults(parsed);
+      if (resultsRes.data && resultsRes.data.targets) {
+        setResults({
+          generated_at: resultsRes.data.generated_at,
+          ticker: resultsRes.data.ticker,
+          bars_analyzed: resultsRes.data.bars_analyzed,
+          date_range: resultsRes.data.date_range,
+          targets: resultsRes.data.targets,
+          notes: resultsRes.data.notes,
+        });
       }
 
       setLoadState("ready");
     })();
   }, []);
 
+  function computeTrainingSnapshot() {
+    if (!bars) return null;
+    const snapshots = [];
+    for (const ex of examples) {
+      const tMs = new Date(ex.occurred_at).getTime();
+      const bar = nearestBarAtOrBefore(bars, tMs);
+      if (!bar) continue;
+      snapshots.push({
+        quality: ex.quality,
+        type: ex.type,
+        direction: ex.direction,
+        notes: ex.notes,
+        features: bar.features,
+      });
+    }
+
+    const mean = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
+    const statsByQuality = {};
+    for (const col of featureCols) {
+      const good = snapshots
+        .filter((s) => s.quality === "Good" && s.features[col] != null)
+        .map((s) => s.features[col]);
+      const bad = snapshots
+        .filter((s) => s.quality === "Bad" && s.features[col] != null)
+        .map((s) => s.features[col]);
+      if (good.length && bad.length) {
+        statsByQuality[col] = {
+          mean_good: Math.round(mean(good) * 100) / 100,
+          mean_bad: Math.round(mean(bad) * 100) / 100,
+          n_good: good.length,
+          n_bad: bad.length,
+        };
+      }
+    }
+
+    return {
+      generated_at: new Date().toISOString(),
+      examples_used: snapshots.length,
+      feature_columns: featureCols,
+      example_snapshots: snapshots,
+      feature_stats_by_quality: statsByQuality,
+    };
+  }
+
   function prepareModelPrompt() {
     setBuildError(null);
     try {
       if (!bars || !results) {
         throw new Error(
-          "Price/regression data isn't loaded — smaug_bars.json and smaug_results.json must be reachable."
+          "Price/regression data isn't loaded — the bars and analysis_runs tables must be reachable."
         );
       }
-
-      const snapshots = [];
-      for (const ex of examples) {
-        const tMs = new Date(ex.occurred_at).getTime();
-        const bar = nearestBarAtOrBefore(bars, tMs);
-        if (!bar) continue;
-        snapshots.push({
-          quality: ex.quality,
-          type: ex.type,
-          direction: ex.direction,
-          notes: ex.notes,
-          features: bar.features,
-        });
-      }
-
-      const mean = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
-      const statsByQuality = {};
-      for (const col of featureCols) {
-        const good = snapshots
-          .filter((s) => s.quality === "Good" && s.features[col] != null)
-          .map((s) => s.features[col]);
-        const bad = snapshots
-          .filter((s) => s.quality === "Bad" && s.features[col] != null)
-          .map((s) => s.features[col]);
-        if (good.length && bad.length) {
-          statsByQuality[col] = {
-            mean_good: Math.round(mean(good) * 100) / 100,
-            mean_bad: Math.round(mean(bad) * 100) / 100,
-            n_good: good.length,
-            n_bad: bad.length,
-          };
-        }
-      }
+      const snap = computeTrainingSnapshot();
 
       const regressionSummary = {};
       for (const [tKey, t] of Object.entries(results.targets)) {
@@ -3283,9 +3275,9 @@ function ModelTab() {
         bars_analyzed: results.bars_analyzed,
         date_range: results.date_range,
         feature_columns: featureCols,
-        examples_used: snapshots.length,
-        feature_stats_by_quality: statsByQuality,
-        example_snapshots: snapshots,
+        examples_used: snap.examples_used,
+        feature_stats_by_quality: snap.feature_stats_by_quality,
+        example_snapshots: snap.example_snapshots,
         regression_summary: regressionSummary,
       };
 
@@ -3296,13 +3288,20 @@ function ModelTab() {
       setPendingPrompt(prompt);
       setPendingMeta({
         barsAnalyzed: results.bars_analyzed || 0,
-        examplesUsed: snapshots.length,
+        examplesUsed: snap.examples_used,
         dateRange: results.date_range,
       });
       setStage("awaiting-paste");
     } catch (err) {
       setBuildError(err.message);
     }
+  }
+
+  function startRoutineBuild() {
+    setBuildError(null);
+    setPendingPrompt(null);
+    setPendingMeta(null);
+    setStage("awaiting-paste");
   }
 
   function cancelModelPrompt() {
@@ -3324,12 +3323,16 @@ function ModelTab() {
         ? modelOut.confidence
         : "low";
 
+      // Local builds set pendingMeta from data already loaded here; routine
+      // builds skip that (no data is fetched client-side for that path) and
+      // instead self-report bars_analyzed/examples_used/date_range in their
+      // own response, since the routine reads the source files itself.
       const { data, error } = await supabase
         .from("entry_models")
         .insert({
-          bars_analyzed: pendingMeta.barsAnalyzed,
-          examples_used: pendingMeta.examplesUsed,
-          date_range: pendingMeta.dateRange,
+          bars_analyzed: modelOut.bars_analyzed ?? pendingMeta?.barsAnalyzed ?? 0,
+          examples_used: modelOut.examples_used ?? pendingMeta?.examplesUsed ?? 0,
+          date_range: modelOut.date_range ?? pendingMeta?.dateRange ?? null,
           rules,
           summary: typeof modelOut.summary === "string" ? modelOut.summary : "",
           confidence,
@@ -3412,6 +3415,20 @@ function ModelTab() {
         >
           Build model
         </button>
+        <button
+          onClick={startRoutineBuild}
+          disabled={stage === "awaiting-paste"}
+          title="Paste the output of a Claude Code routine that reads the analysis_runs/bars tables and your training_examples directly from Supabase, plus smaug_pipeline.py from GitHub"
+          style={{
+            ...retryBtn,
+            borderColor: T.amber,
+            color: stage === "awaiting-paste" ? T.faint : T.amber,
+            padding: "9px 14px",
+            cursor: stage === "awaiting-paste" ? "default" : "pointer",
+          }}
+        >
+          Build via routine
+        </button>
         <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
           {examples.length} training example{examples.length === 1 ? "" : "s"} logged
           {!bars && " · bars data unavailable"}
@@ -3421,7 +3438,12 @@ function ModelTab() {
 
       {stage === "awaiting-paste" && (
         <div style={{ marginBottom: 14 }}>
-          <CopyPasteAI prompt={pendingPrompt} onSubmit={submitModel} onCancel={cancelModelPrompt} />
+          <CopyPasteAI
+            prompt={pendingPrompt}
+            onSubmit={submitModel}
+            onCancel={cancelModelPrompt}
+            showPromptBox={!!pendingPrompt}
+          />
           {submitting && (
             <div style={{ fontSize: 12, color: T.dim, marginTop: 6 }}>Saving…</div>
           )}
@@ -3466,13 +3488,13 @@ const TABS = [
   "Morning Brief",
   "Journal",
   "Modeling",
-  "Raw Data",
   "Training Data",
   "Model",
   "Resources",
 ];
 
 export default function Smaug() {
+  const session = useSession();
   const now = useEtClock();
   const countdown = openCountdown(now);
   const [tab, setTab] = useState("Morning Brief");
@@ -3482,31 +3504,28 @@ export default function Smaug() {
     sentiment: null,
     cases: null,
   });
-  const [briefStage, setBriefStage] = useState("idle");
-  const [briefPrompt, setBriefPrompt] = useState(null);
   const [lastRun, setLastRun] = useState(null);
 
-  function runAll() {
-    setBriefPrompt(buildMorningBriefPrompt());
-    setBriefStage("awaiting-paste");
-  }
-
-  function submitBrief(parsed) {
-    setPanels({
-      econ: parsed.econ || null,
-      earnings: parsed.earnings || null,
-      sentiment: parsed.sentiment || null,
-      cases: parsed.cases || null,
-    });
-    setBriefStage("idle");
-    setBriefPrompt(null);
-    setLastRun(etNow());
-  }
-
-  function cancelBrief() {
-    setBriefStage("idle");
-    setBriefPrompt(null);
-  }
+  useEffect(() => {
+    if (!session) return;
+    (async () => {
+      const { data } = await supabase
+        .from("daily_briefs")
+        .select("*")
+        .order("generated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (data) {
+        setPanels({
+          econ: data.econ || null,
+          earnings: data.earnings || null,
+          sentiment: data.sentiment || null,
+          cases: data.cases || null,
+        });
+        setLastRun(new Date(data.generated_at));
+      }
+    })();
+  }, [session]);
 
   return (
     <AuthGate>
@@ -3516,7 +3535,7 @@ export default function Smaug() {
         background: T.bg,
         fontFamily: T.sans,
         color: T.ink,
-        padding: "20px 18px 40px",
+        padding: "12px 18px 40px",
       }}
     >
       <style>{`
@@ -3526,49 +3545,76 @@ export default function Smaug() {
         @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
       `}</style>
 
-      <div style={{ maxWidth: 1100, margin: "0 auto" }}>
-        {/* header: left stack (wordmark, date, session, tabs) + logo right */}
+      {/* header: logo top-left (absolute, doesn't affect row height), centered wordmark, sign out */}
         <div
           style={{
+            position: "relative",
             display: "flex",
-            flexWrap: "wrap",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 14,
-            marginBottom: 14,
+            justifyContent: "flex-end",
+            minHeight: 74,
+            marginBottom: 20,
           }}
         >
-          <div style={{ minWidth: 0 }}>
+          <img
+            src={LOGO}
+            alt="Smaug logo"
+            width={200}
+            height={200}
+            style={{ display: "block", position: "absolute", left: 0, top: 0 }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              left: "50%",
+              top: 14,
+              transform: "translateX(-50%)",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+            }}
+          >
             <img
               src={WORDMARK}
               alt="SMAUG"
-              style={{
-                display: "block",
-                height: 40,
-                width: "auto",
-                maxWidth: "100%",
-              }}
+              style={{ display: "block", height: 48, width: "auto" }}
             />
             <div
-              style={{
-                width: 120,
-                height: 2,
-                background: T.amber,
-                margin: "8px 0 6px",
-              }}
+              style={{ width: 130, height: 2, background: T.amber, margin: "7px 0 0" }}
             />
+          </div>
+          {session && (
+            <button
+              onClick={() => supabase.auth.signOut()}
+              style={{ ...retryBtn, padding: "3px 10px", fontSize: 11, flexShrink: 0 }}
+            >
+              Sign out ({session.user.email})
+            </button>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 28, alignItems: "flex-start" }}>
+          {/* left sidebar: date, session strip, nav — starts below the absolute logo above */}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 2,
+              width: 200,
+              flexShrink: 0,
+            }}
+          >
+            {/* clears the 200px logo, which is absolutely positioned in the header row above */}
+            <div style={{ marginTop: 106 }} />
             <div
               style={{
                 fontSize: 13,
                 color: T.dim,
                 fontWeight: 300,
-                marginBottom: 10,
+                marginBottom: 6,
               }}
             >
               {todayLabel()}
             </div>
-
-            {/* session strip */}
             <div
               style={{
                 display: "inline-flex",
@@ -3580,7 +3626,7 @@ export default function Smaug() {
                 color: T.dim,
                 borderTop: `1px solid ${T.panelEdge}`,
                 borderBottom: `1px solid ${T.panelEdge}`,
-                padding: "8px 24px 8px 2px",
+                padding: "6px 24px 6px 2px",
                 marginBottom: 10,
               }}
             >
@@ -3592,81 +3638,53 @@ export default function Smaug() {
               </span>
               <span style={{ color: countdown.tone }}>{countdown.label}</span>
             </div>
-
-            {/* tabs */}
-            <div
-              style={{
-                display: "flex",
-                gap: 4,
-                overflowX: "auto",
-              }}
-            >
-          {TABS.map((t) => {
-            const active = tab === t;
-            return (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  borderBottom: active
-                    ? `2px solid ${T.amber}`
-                    : "2px solid transparent",
-                  color: active ? T.ink : T.faint,
-                  fontFamily: T.display,
-                  fontSize: 18,
-                  letterSpacing: "0.06em",
-                  padding: "6px 14px",
-                  cursor: "pointer",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {t.toUpperCase()}
-              </button>
-            );
-          })}
-            </div>
+            {TABS.map((t) => {
+              const active = tab === t;
+              return (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  style={{
+                    background: active ? "rgba(224,123,42,0.1)" : "transparent",
+                    border: "none",
+                    borderLeft: active
+                      ? `2px solid ${T.amber}`
+                      : "2px solid transparent",
+                    color: active ? T.ink : T.faint,
+                    fontFamily: T.display,
+                    fontSize: 17,
+                    letterSpacing: "0.06em",
+                    padding: "0 12px",
+                    height: 48,
+                    display: "flex",
+                    alignItems: "center",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {t.toUpperCase()}
+                </button>
+              );
+            })}
           </div>
 
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "flex-end",
-              gap: 8,
-              flexShrink: 0,
-            }}
-          >
-            <img
-              src={LOGO}
-              alt="Smaug logo"
-              width={180}
-              height={180}
-              style={{ display: "block", flexShrink: 0 }}
-            />
-          </div>
-        </div>
-
-        {/* tab content */}
+          {/* tab content */}
+          <div style={{ flex: 1, minWidth: 0 }}>
         {tab === "Morning Brief" && (
-          <MorningBriefTab
-            panels={panels}
-            stage={briefStage}
-            prompt={briefPrompt}
-            runAll={runAll}
-            submitBrief={submitBrief}
-            cancelBrief={cancelBrief}
-            lastRun={lastRun}
-          />
+          <MorningBriefTab panels={panels} lastRun={lastRun} />
         )}
         {tab === "Journal" && <JournalTab />}
-        {tab === "Modeling" && <TechnicalsTab />}
-        {tab === "Raw Data" && <RawDataTab />}
+        {tab === "Modeling" && (
+          <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+            <TechnicalsTab />
+          </div>
+        )}
         {tab === "Training Data" && <TrainingDataTab />}
         {tab === "Model" && <ModelTab />}
         {tab === "Resources" && <ResourcesTab />}
-      </div>
+          </div>
+        </div>
     </div>
     </AuthGate>
   );

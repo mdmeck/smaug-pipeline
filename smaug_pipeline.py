@@ -2,14 +2,21 @@
 Smaug daily regression pipeline for SPY 1-minute data.
 
 Run once per day after the close (scheduled). Each run:
-  1. Pulls recent SPY 1-min bars from yfinance and upserts into SQLite
+  1. Pulls recent SPY 1-min bars from yfinance and upserts into Supabase
      (yfinance serves ~7-8 days of 1-min history, so daily runs never miss).
-  2. Computes indicator features per bar.
+  2. Computes indicator features per bar and upserts them alongside the
+     bars (full retained window, every run, so the stored features
+     self-heal if this file's feature formulas ever change).
   3. Builds forward-move targets at several horizons.
   4. Runs correlation, OLS regression (time-based train/test split),
-     and decile analysis.
-  5. Writes smaug_results.json (paste into the Smaug Technicals tab)
-     and a human-readable smaug_report.txt.
+     and decile analysis, and inserts the result as a new row in
+     analysis_runs.
+  5. Also writes local smaug_results.json/smaug_bars.json/smaug_report.txt
+     for local debugging — these are gitignored, not committed.
+
+Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the environment.
+The service-role key bypasses Row Level Security, so it must only ever
+be used here (server-side) — never in the browser-facing webapp.
 
 Usage:
   python smaug_pipeline.py              # normal daily run
@@ -19,14 +26,14 @@ Usage:
 
 import argparse
 import json
-import sqlite3
+import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+import requests
 
-DB_PATH = "spy_1m.db"
 RESULTS_JSON = "smaug_results.json"
 REPORT_TXT = "smaug_report.txt"
 BARS_JSON = "smaug_bars.json"
@@ -36,20 +43,177 @@ MFE_HORIZON = 10                # minutes for max-favorable-excursion target
 RTH_ONLY = True                 # keep regular trading hours only (9:30-16:00 ET)
 TEST_FRACTION = 0.25            # most recent 25% of data held out for testing
 MIN_ROWS = 500                  # refuse to run analysis on less than this
-RETENTION_DAYS = 30             # prune bars older than this so the DB stays bounded
+RETENTION_DAYS = 30             # prune bars older than this so the table stays bounded
+SUPABASE_PAGE_SIZE = 1000       # PostgREST's default max rows per request
+SUPABASE_BATCH_SIZE = 500       # rows per upsert request
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
 
 # ----------------------------------------------------------------------
-# Data layer
+# Data layer (Supabase — bars + analysis_runs, both public-read,
+# service-role-write only; see webapp/supabase/schema.sql)
 # ----------------------------------------------------------------------
-def init_db(conn):
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS bars (
-            ts TEXT PRIMARY KEY,          -- ISO timestamp, ET
-            open REAL, high REAL, low REAL, close REAL, volume INTEGER
-        )"""
+def _supabase_headers(prefer=None):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        raise RuntimeError(
+            "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in the environment."
+        )
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def _raise_for_status(resp):
+    """requests' raise_for_status() drops the response body, which is
+    exactly where PostgREST puts the useful error (bad column, failed
+    constraint, etc) — surface it instead of a bare '400 Client Error'."""
+    if resp.status_code >= 400:
+        raise requests.exceptions.HTTPError(
+            f"{resp.status_code} {resp.reason} for {resp.url}: {resp.text}"
+        )
+
+
+def _json_safe(v):
+    """None for NaN/inf so json.dumps never emits a bare `NaN` token —
+    that's invalid JSON and PostgREST rejects the whole batch on it."""
+    if v is None:
+        return None
+    if isinstance(v, float) and not np.isfinite(v):
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return v
+
+
+def upsert_bars_supabase(df):
+    """Upsert raw OHLCV only. merge-duplicates only touches columns present
+    in the request body, so this never clobbers an existing row's features
+    (set separately by upsert_features_supabase)."""
+    rows = [
+        {
+            "ts": ts.isoformat(),
+            "ticker": TICKER,
+            "open": float(r.open), "high": float(r.high),
+            "low": float(r.low), "close": float(r.close),
+            "volume": int(r.volume),
+        }
+        for ts, r in df.iterrows()
+        if not (np.isnan(r.open) or np.isnan(r.close))
+    ]
+    headers = _supabase_headers(prefer="resolution=merge-duplicates,return=minimal")
+    for i in range(0, len(rows), SUPABASE_BATCH_SIZE):
+        batch = rows[i:i + SUPABASE_BATCH_SIZE]
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/bars", headers=headers, json=batch,
+            params={"on_conflict": "ts"}, timeout=30,
+        )
+        _raise_for_status(resp)
+    return len(rows)
+
+
+def upsert_features_supabase(bars, feats):
+    """Rewrites bars + features for the *entire* retained window every run
+    (not just new bars) — deliberately, so stored features self-heal if
+    compute_features() ever changes, rather than accumulating drift.
+
+    Must include open/high/low/close/volume here even though
+    upsert_bars_supabase already wrote them: Postgres validates a full
+    candidate row against NOT NULL constraints before it even checks
+    ON CONFLICT, so a features-only payload fails that check immediately —
+    even when the row already exists and this would just be an update."""
+    rows = []
+    for ts, r in bars.iterrows():
+        if ts not in feats.index or np.isnan(r.open) or np.isnan(r.close):
+            continue
+        rows.append({
+            "ts": ts.isoformat(),
+            "ticker": TICKER,
+            "open": float(r.open), "high": float(r.high),
+            "low": float(r.low), "close": float(r.close),
+            "volume": int(r.volume),
+            "features": {k: _json_safe(v) for k, v in feats.loc[ts].items()},
+        })
+    headers = _supabase_headers(prefer="resolution=merge-duplicates,return=minimal")
+    for i in range(0, len(rows), SUPABASE_BATCH_SIZE):
+        batch = rows[i:i + SUPABASE_BATCH_SIZE]
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/bars", headers=headers, json=batch,
+            params={"on_conflict": "ts"}, timeout=30,
+        )
+        _raise_for_status(resp)
+    return len(rows)
+
+
+def prune_old_bars_supabase(days=RETENTION_DAYS):
+    """Drop bars older than `days` so the table stays bounded."""
+    cutoff = (pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=days))
+    headers = _supabase_headers()
+    resp = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/bars",
+        headers=headers,
+        params={"ts": f"lt.{cutoff.isoformat()}"},
+        timeout=30,
     )
-    conn.commit()
+    _raise_for_status(resp)
+
+
+def load_all_bars_supabase():
+    headers = _supabase_headers()
+    all_rows = []
+    offset = 0
+    while True:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/bars",
+            headers=headers,
+            params={
+                "select": "ts,open,high,low,close,volume",
+                "order": "ts.asc",
+                "limit": SUPABASE_PAGE_SIZE,
+                "offset": offset,
+            },
+            timeout=30,
+        )
+        _raise_for_status(resp)
+        page = resp.json()
+        all_rows.extend(page)
+        if len(page) < SUPABASE_PAGE_SIZE:
+            break
+        offset += SUPABASE_PAGE_SIZE
+
+    if not all_rows:
+        return pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+            index=pd.DatetimeIndex([], tz="America/New_York"),
+        )
+    df = pd.DataFrame(all_rows)
+    df["ts"] = pd.to_datetime(df["ts"], utc=True).dt.tz_convert("America/New_York")
+    return df.set_index("ts").sort_index()[["open", "high", "low", "close", "volume"]]
+
+
+def insert_analysis_run_supabase(results):
+    headers = _supabase_headers(prefer="return=minimal")
+    payload = {
+        "generated_at": results["generated_at"],
+        "ticker": results["ticker"],
+        "bars_analyzed": results["bars_analyzed"],
+        "date_range": results["date_range"],
+        "targets": results["targets"],
+        "notes": results["notes"],
+    }
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/analysis_runs", headers=headers, json=payload, timeout=30
+    )
+    _raise_for_status(resp)
 
 
 def fetch_recent_bars(retries=3, wait=45):
@@ -86,43 +250,10 @@ def fetch_recent_bars(retries=3, wait=45):
     )[["open", "high", "low", "close", "volume"]]
     df.index = df.index.tz_convert("America/New_York")
     # prepost=True also pulls post-market bars, which nothing here uses —
-    # drop them so the DB (and its 30-day git history) only grows to cover
-    # what the pipeline actually needs: premarket through the RTH close.
+    # drop them so the retained window only covers what the pipeline
+    # actually needs: premarket through the RTH close.
     minute_of_day = df.index.hour * 60 + df.index.minute
     df = df[minute_of_day < 16 * 60]
-    return df
-
-
-def upsert_bars(conn, df):
-    rows = [
-        (ts.isoformat(), float(r.open), float(r.high), float(r.low),
-         float(r.close), int(r.volume))
-        for ts, r in df.iterrows()
-        if not (np.isnan(r.open) or np.isnan(r.close))
-    ]
-    conn.executemany(
-        "INSERT OR REPLACE INTO bars VALUES (?,?,?,?,?,?)", rows
-    )
-    conn.commit()
-    return len(rows)
-
-
-def prune_old_bars(conn, days=RETENTION_DAYS):
-    """Drop bars older than `days` so the DB (and its git history) stay bounded."""
-    cutoff = (pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=days))
-    conn.execute("DELETE FROM bars WHERE ts < ?", (cutoff.isoformat(),))
-    conn.commit()
-
-
-def load_all_bars(conn):
-    df = pd.read_sql("SELECT * FROM bars ORDER BY ts", conn)
-    df["ts"] = pd.to_datetime(df["ts"], utc=False)
-    # normalize any mixed tz representations
-    if df["ts"].dt.tz is None:
-        df["ts"] = df["ts"].dt.tz_localize("America/New_York",
-                                           ambiguous="NaT",
-                                           nonexistent="NaT")
-    df = df.dropna(subset=["ts"]).set_index("ts")
     return df
 
 
@@ -309,7 +440,7 @@ def run_analysis(bars):
     )
 
     results = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ticker": TICKER,
         "bars_analyzed": 0,
         "date_range": None,
@@ -462,36 +593,40 @@ def main():
                     help="use fake data (smoke test, no network)")
     args = ap.parse_args()
 
-    conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
-
     if args.synthetic:
-        n = upsert_bars(conn, synthetic_bars())
+        n = upsert_bars_supabase(synthetic_bars())
         print(f"[synthetic] upserted {n} fake bars")
     elif not args.no_fetch:
         try:
             df = fetch_recent_bars()
-            n = upsert_bars(conn, df)
-            print(f"fetched + upserted {n} bars from yfinance")
+            n = upsert_bars_supabase(df)
+            print(f"fetched + upserted {n} bars to Supabase")
         except Exception as e:
             print(f"WARNING: fetch failed ({e}); analyzing stored data only",
                   file=sys.stderr)
 
-    prune_old_bars(conn)
+    prune_old_bars_supabase()
 
-    bars = load_all_bars(conn)
+    bars = load_all_bars_supabase()
     if len(bars) < MIN_ROWS:
         print(f"Only {len(bars)} bars stored — need {MIN_ROWS}+. "
               "Run daily to accumulate.", file=sys.stderr)
         sys.exit(1)
 
+    feats = compute_features(bars)
+    n_feat = upsert_features_supabase(bars, feats)
+    print(f"upserted features for {n_feat} bars")
+
     results = run_analysis(bars)
+    insert_analysis_run_supabase(results)
+    print("inserted analysis_runs row")
+
     with open(RESULTS_JSON, "w") as f:
         json.dump(results, f, indent=1)
-    print(f"wrote {RESULTS_JSON}")
+    print(f"wrote local {RESULTS_JSON} (debug only, not committed)")
 
     write_bars_json(bars)
-    print(f"wrote {BARS_JSON}")
+    print(f"wrote local {BARS_JSON} (debug only, not committed)")
     print()
     print(write_report(results))
 
